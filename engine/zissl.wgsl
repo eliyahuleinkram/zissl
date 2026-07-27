@@ -478,10 +478,22 @@ fn zk_move(@builtin(global_invocation_id) gid: vec3u) {
   } else {
     ang += (rnd - 0.5) * 2.0 * ta;
   }
-  ang += (rnd - 0.5) * 0.25 * ta;
+  // constant exploration jitter — NOT scaled by turn, so even a docile
+  // colony keeps wandering instead of freezing onto one attractor
+  ang += (rnd - 0.5) * (0.25 * ta + 0.05 * SU.dt * 60.0);
   var np = pos + vec2f(cos(ang), sin(ang)) * SU.speed * SU.dt * 60.0;
   np.x = np.x - SU.w * floor(np.x / SU.w);
   np.y = np.y - SU.h * floor(np.y / SU.h);
+  // REBIRTH — ~0.15% of the colony re-seeds each frame (mean life ≈ 11 s).
+  // Without it the swarm eventually collapses into the brightest point of
+  // the food field and the picture starves; with it, the field is forever
+  // being re-explored and the filament network stays alive indefinitely.
+  let r2 = z_hashf(i * 2654435761u + u32(SU.t * 977.0) * 668265263u);
+  if (r2 < 0.0015 * SU.dt * 60.0) {
+    np.x = z_hashf(i * 3266489917u + u32(SU.t * 1409.0)) * SU.w;
+    np.y = z_hashf(i * 1274126177u + u32(SU.t * 2003.0)) * SU.h;
+    ang = z_hashf(i * 2246822519u + u32(SU.t * 3571.0)) * 6.2832;
+  }
   a.x = np.x;
   a.y = np.y;
   a.ang = ang;
