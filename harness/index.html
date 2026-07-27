@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>zissl golden gate — pixel-diff vs hydra-synth</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: #0a0a0f; color: #e8e6f2; font: 13px/1.5 ui-monospace, Menlo, monospace; padding: 24px; }
+  h1 { font-size: 15px; color: #b9aaff; margin-bottom: 4px; }
+  p { color: #6f6a85; margin-bottom: 16px; }
+  table { border-collapse: collapse; width: 100%; max-width: 860px; }
+  td, th { padding: 3px 10px; text-align: left; border-bottom: 1px solid #1c1c28; }
+  th { color: #6f6a85; font-weight: normal; }
+  .pass { color: #7ee2a8; }
+  .fail { color: #ff8da3; }
+  .num { font-variant-numeric: tabular-nums; }
+  #summary { margin: 14px 0; font-size: 14px; }
+  .stage { display: flex; gap: 12px; margin-bottom: 16px; align-items: flex-start; }
+  .stage figure { margin: 0; }
+  .stage figcaption { color: #6f6a85; font-size: 11px; margin-top: 3px; }
+  canvas { image-rendering: pixelated; border: 1px solid #1c1c28; }
+</style>
+</head>
+<body>
+<h1>zissl golden gate</h1>
+<p>Every sketch rendered by hydra-synth (WebGL) and zissl (WebGPU) on the same pinned clock, pixel-diffed. The zaltz treatment, applied to the picture.</p>
+<div class="stage">
+  <figure><canvas id="hc" width="256" height="144" style="width:256px"></canvas><figcaption>hydra-synth (reference)</figcaption></figure>
+  <figure><canvas id="zc" width="256" height="144" style="width:256px"></canvas><figcaption>zissl (candidate)</figcaption></figure>
+  <figure><canvas id="dc" width="256" height="144" style="width:256px"></canvas><figcaption>diff ×8</figcaption></figure>
+</div>
+<div id="summary">booting…</div>
+<table id="results"><tr><th>sketch</th><th>MAE</th><th>corr</th><th>&gt;8/255 px</th><th></th></tr></table>
+
+<script src="../node_modules/hydra-synth/dist/hydra-synth.js"></script>
+<script type="module">
+import Zissl from "../index.js";
+import { SKETCHES } from "./sketches.js";
+
+const W = 256, H = 144;
+const DT = 16.666666;       // ms per warmup tick, both engines
+const WARM = 24;            // frames — lets feedback loops settle identically
+const T0 = 3.7;             // seconds on the shared clock at first tick
+// Verdict thresholds: 8-bit output, two GPUs, two float pipelines — indistinguishable
+// in practice means MAE under ~2.5/255 with correlation ≥ 0.995.
+const MAE_PASS = 2.5, CORR_PASS = 0.995, HOT_PASS = 0.02;
+
+const hCanvas = document.getElementById("hc");
+const zCanvas = document.getElementById("zc");
+const dCanvas = document.getElementById("dc");
+const results = document.getElementById("results");
+const summary = document.getElementById("summary");
+
+// --- hydra (reference) -------------------------------------------------
+const hydra = new Hydra({
+  canvas: hCanvas, width: W, height: H,
+  makeGlobal: false, detectAudio: false, autoLoop: false, precision: "highp",
+});
+const hs = hydra.synth;
+const gl = hCanvas.getContext("webgl2") ?? hCanvas.getContext("webgl");
+
+function renderHydra(sketch, warm = WARM) {
+  hs.hush();
+  hs.speed = 1;
+  // hush() swaps programs but leaves the last picture in the ping-pong fbos —
+  // flush BOTH buffers to black so every sketch starts from the same silence.
+  for (let i = 0; i < 2; i++) hydra.tick(DT);
+  sketch(hs);
+  hs.render(hs.o0);
+  hs.time = T0;
+  for (let i = 0; i < warm; i++) hydra.tick(DT);
+  const buf = new Uint8Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  // GL reads bottom-up; flip to top-down so both sides share an orientation
+  const flip = new Uint8ClampedArray(W * H * 4);
+  for (let y = 0; y < H; y++) flip.set(buf.subarray((H - 1 - y) * W * 4, (H - y) * W * 4), y * W * 4);
+  return flip;
+}
+
+// --- zissl (candidate) -------------------------------------------------
+const z = await Zissl.create({ canvas: zCanvas, width: W, height: H, autoLoop: false });
+
+async function renderZissl(sketch, warm = WARM) {
+  z.hush();
+  z.speed = 1;
+  for (let i = 0; i < 2; i++) z.tick(DT); // symmetric flush (zissl hush clears on next tick)
+  sketch(z);
+  z.render(z.o0);
+  await z.ready(); // .out() compiles async — tick only when the program is live
+  z.time = T0;
+  for (let i = 0; i < warm; i++) z.tick(DT);
+  const img = await z.readPixels(z.o0);
+  return img.data;
+}
+
+// --- diff --------------------------------------------------------------
+function compare(a, b) {
+  let sumAbs = 0, hot = 0, n = 0;
+  let sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    for (let c = 0; c < 3; c++) {
+      const d = Math.abs(a[i + c] - b[i + c]);
+      sumAbs += d;
+      if (d > 8) hot++;
+      n++;
+    }
+    const la = 0.299 * a[i] + 0.587 * a[i + 1] + 0.114 * a[i + 2];
+    const lb = 0.299 * b[i] + 0.587 * b[i + 1] + 0.114 * b[i + 2];
+    sa += la; sb += lb; saa += la * la; sbb += lb * lb; sab += la * lb;
+  }
+  const px = a.length / 4;
+  const cov = sab / px - (sa / px) * (sb / px);
+  const va = saa / px - (sa / px) ** 2;
+  const vb = sbb / px - (sb / px) ** 2;
+  const corr = va > 1e-6 && vb > 1e-6 ? cov / Math.sqrt(va * vb) : va < 1e-6 && vb < 1e-6 ? 1 : 0;
+  return { mae: sumAbs / n, corr, hotFrac: hot / n };
+}
+
+function showDiff(a, b) {
+  const d = dCanvas.getContext("2d");
+  const img = d.createImageData(W, H);
+  for (let i = 0; i < a.length; i += 4) {
+    for (let c = 0; c < 3; c++) img.data[i + c] = Math.min(255, Math.abs(a[i + c] - b[i + c]) * 8);
+    img.data[i + 3] = 255;
+  }
+  d.putImageData(img, 0, 0);
+}
+
+// --- run ---------------------------------------------------------------
+const rows = [];
+for (const [name, sketch, opts] of SKETCHES) {
+  let verdict;
+  try {
+    const ha = renderHydra(sketch, opts?.warm);
+    const za = await renderZissl(sketch, opts?.warm);
+    showDiff(ha, za);
+    const m = compare(ha, za);
+    const pass = m.mae <= MAE_PASS && m.corr >= CORR_PASS && m.hotFrac <= HOT_PASS;
+    verdict = { name, ...m, pass };
+  } catch (e) {
+    verdict = { name, mae: NaN, corr: NaN, hotFrac: NaN, pass: false, err: String(e).slice(0, 120) };
+  }
+  rows.push(verdict);
+  const tr = document.createElement("tr");
+  tr.innerHTML = `<td>${verdict.name}</td>
+    <td class="num">${verdict.mae.toFixed(2)}</td>
+    <td class="num">${verdict.corr.toFixed(4)}</td>
+    <td class="num">${(verdict.hotFrac * 100).toFixed(2)}%</td>
+    <td class="${verdict.pass ? "pass" : "fail"}">${verdict.pass ? "pass" : "FAIL"}${verdict.err ? " — " + verdict.err : ""}</td>`;
+  results.appendChild(tr);
+  summary.textContent = `${rows.filter((r) => r.pass).length}/${rows.length} pass…`;
+}
+const passed = rows.filter((r) => r.pass).length;
+const worst = rows.filter((r) => !isNaN(r.mae)).sort((x, y) => y.mae - x.mae)[0];
+summary.innerHTML = `<b class="${passed === rows.length ? "pass" : "fail"}">${passed}/${rows.length} pass</b>` +
+  (worst ? ` — worst MAE ${worst.mae.toFixed(2)} (${worst.name})` : "");
+window.__gate = rows; // machine-readable for CI / the agent
+window.__dbg = { hydra, hs, gl, z, renderHydra, renderZissl, compare, W, H };
+</script>
+</body>
+</html>

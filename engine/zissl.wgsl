@@ -29,7 +29,8 @@ fn z_mod(x: f32, y: f32) -> f32 {
 }
 
 fn z_lum(c: vec3f) -> f32 {
-  return dot(c, vec3f(0.299, 0.587, 0.114));
+  // Rec.709 weights — hydra's _luminance exactly (not the 601 constants).
+  return dot(c, vec3f(0.2125, 0.7154, 0.0721));
 }
 
 fn z_rgb2hsv(c: vec3f) -> vec3f {
@@ -47,10 +48,12 @@ fn z_hsv2rgb(c: vec3f) -> vec3f {
   return c.z * mix(K.xxx, clamp(p - K.xxx, vec3f(0.0), vec3f(1.0)), c.y);
 }
 
-// Sample with the y-flip that maps texture rows (top-down) back into
-// Hydra's bottom-left st space. Every texture read goes through here.
+// Every texture read goes through here. Hydra's st space runs TOP-DOWN on
+// screen (st.y = 0 at the top — measured against hydra-synth's own render in
+// harness/, not assumed), which is also raw texture space: no flip anywhere,
+// and feedback loops, images and readbacks all round-trip identically.
 fn zt_tex(t: texture_2d<f32>, s: sampler, st: vec2f) -> vec4f {
-  return textureSample(t, s, vec2f(st.x, 1.0 - st.y));
+  return textureSample(t, s, st);
 }
 
 // Ashima 3D simplex noise — the same one Hydra ships via glsl-noise.
@@ -240,11 +243,12 @@ fn zc_posterize(c0: vec4f, bins: f32, gamma: f32) -> vec4f {
 }
 
 fn zc_shift(c0: vec4f, r: f32, g: f32, b: f32, a: f32) -> vec4f {
+  // hydra fracts the PARAMETER, not the sum — the color itself never wraps.
   var c2 = c0;
-  c2.r = fract(c2.r + r);
-  c2.g = fract(c2.g + g);
-  c2.b = fract(c2.b + b);
-  c2.a = fract(c2.a + a);
+  c2.r = c2.r + fract(r);
+  c2.g = c2.g + fract(g);
+  c2.b = c2.b + fract(b);
+  c2.a = c2.a + fract(a);
   return c2;
 }
 
@@ -353,7 +357,9 @@ fn zm_modulateRepeatX(st0: vec2f, c1: vec4f, reps: f32, offset: f32) -> vec2f {
 }
 
 fn zm_modulateRepeatY(st0: vec2f, c1: vec4f, reps: f32, offset: f32) -> vec2f {
-  var st = st0 * vec2f(1.0, reps);
+  // hydra's Y variant scales x by reps, same as X — a reference quirk we
+  // keep bug-for-bug (the harness measures against hydra, not against taste).
+  var st = st0 * vec2f(reps, 1.0);
   st.x = st.x + step(1.0, z_mod(st.y, 2.0)) + c1.r * offset;
   return fract(st);
 }

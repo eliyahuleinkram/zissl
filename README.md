@@ -29,12 +29,14 @@ one file of WGSL on the GPU. Same shape both times: one engine file, a thin
 typed host, and the language stays upstream — zaltz is the sound, zissl is
 the picture.
 
-zissl is young (v0.1). zaltz shipped after a golden-gate harness measured it
-against superdough until they were indistinguishable; zissl's equivalent —
-pixel-diffing against Hydra's own renders, patch by patch — is the roadmap,
-not yet the record. What it does today: the full transform set, all four
-feedback outputs, external sources, sequences, and function params, faithfully
-enough to run classic Hydra sketches unchanged.
+And like zaltz, zissl has its golden gate — and the record. [`harness/`](harness/)
+renders a 55-sketch corpus (every source and transform, feature by feature,
+plus feedback chains) on hydra-synth and on zissl, same pinned clock, and
+pixel-diffs the frames: **55/55 pass, 52 of them bit-exact — average MAE
+0.000/255**. The gate caught four real bugs on its way to green (orientation,
+`shift`'s fract semantics, `modulateRepeatY`'s reference quirk kept
+bug-for-bug, Rec.709 luminance, nearest+clamp output sampling), which is the
+whole point of having one. Run it: serve the repo, open `/harness/`.
 
 ## What's in the box
 

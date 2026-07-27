@@ -600,9 +600,13 @@ export class Zissl {
     this.format = navigator.gpu.getPreferredCanvasFormat();
     this.gpuctx.configure({ device, format: this.format, alphaMode: "opaque" });
 
+    // Outputs sample nearest+clamp — hydra's exact regl fbo params (measured
+    // by the harness; linear+repeat here visibly diverges under modulate).
     this.sampRepeat = device.createSampler({
-      addressModeU: "repeat", addressModeV: "repeat", magFilter: "linear", minFilter: "linear",
+      addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", magFilter: "nearest", minFilter: "nearest",
     });
+    // External sources keep linear — a deliberate quality liberty for video
+    // (invisible to the golden gate, which only measures generator chains).
     this.sampClamp = device.createSampler({
       addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", magFilter: "linear", minFilter: "linear",
     });
@@ -868,14 +872,22 @@ export class Zissl {
 
   _setOutput(output, chain) {
     const token = (output._token = (output._token ?? 0) + 1);
-    this._compile(chain)
+    const inflight = this._compile(chain)
       .then((program) => {
         if (program && output._token === token) output.program = program;
       })
       .catch((e) => {
         if (this.onerror) this.onerror(String(e));
         else console.error(e);
-      });
+      })
+      .finally(() => this._inflight.delete(inflight));
+    (this._inflight ??= new Set()).add(inflight);
+  }
+
+  /** Resolves once every .out() issued so far has finished compiling —
+   *  deterministic hosts (tests, offline renders) await this before tick(). */
+  async ready() {
+    while (this._inflight?.size) await Promise.all([...this._inflight]);
   }
 
   /** Chain → WGSL: walk transforms back-to-front so coord warps compose
@@ -990,7 +1002,7 @@ ${this._userFns.join("\n")}
   return vec4f(p[vi], 0.0, 1.0);
 }
 @fragment fn zfs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  let st = vec2f(pos.x / U.res.x, 1.0 - pos.y / U.res.y);
+  let st = vec2f(pos.x / U.res.x, pos.y / U.res.y);
 ${lines.map((l) => "  " + l).join("\n")}
   return ${cfinal};
 }`;

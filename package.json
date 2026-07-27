@@ -39,5 +39,8 @@
     "creative-coding"
   ],
   "license": "AGPL-3.0-or-later",
-  "author": "Klappn (https://klappn.com)"
+  "author": "Klappn (https://klappn.com)",
+  "devDependencies": {
+    "hydra-synth": "^1.4.0"
+  }
 }
