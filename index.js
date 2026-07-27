@@ -570,8 +570,10 @@ export class Zissl {
   constructor(device, canvas, opts) {
     this.device = device;
     this.canvas = canvas;
-    this.width = opts.width ?? canvas.width ?? 1280;
-    this.height = opts.height ?? canvas.height ?? 720;
+    // Floor at 1 — a canvas measured mid-layout can report 0, and a 0-sized
+    // texture poisons every pass that touches it.
+    this.width = Math.max(1, Math.floor(opts.width ?? canvas.width ?? 1280)) || 1280;
+    this.height = Math.max(1, Math.floor(opts.height ?? canvas.height ?? 720)) || 720;
     canvas.width = this.width;
     canvas.height = this.height;
 
@@ -710,10 +712,10 @@ export class Zissl {
   }
 
   setResolution(width, height) {
-    this.width = width;
-    this.height = height;
-    this.canvas.width = width;
-    this.canvas.height = height;
+    this.width = Math.max(1, Math.floor(width)) || 1;
+    this.height = Math.max(1, Math.floor(height)) || 1;
+    this.canvas.width = this.width;
+    this.canvas.height = this.height;
     for (const o of this._outputs) o._alloc();
   }
 
