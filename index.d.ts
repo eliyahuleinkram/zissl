@@ -117,6 +117,27 @@ export interface ZisslOptions {
   height?: number;
   /** Install the Hydra globals (osc, noise, o0…, render, hush…) on globalThis. */
   makeGlobal?: boolean;
+  /** false hands the render loop to the host — drive frames with tick(dtMs). */
+  autoLoop?: boolean;
+}
+
+/** The deeper swarm knobs, set via swarm.tune({...}). */
+export interface SwarmTuning {
+  deposit?: number;
+  decay?: number;
+  senseAng?: number;
+  senseDist?: number;
+  steerAmt?: number;
+  speed?: number;
+  turn?: number;
+}
+
+/** swarm(count, steer, speed, turn) — a physarum colony on compute shaders:
+ *  agents sense the trail field AND `steer`'s picture, deposit as they walk;
+ *  the trail feeds back into the language as an ordinary source. */
+export interface SwarmFn {
+  (count?: number, steer?: Output | Source | null, speed?: number, turn?: number): Chain;
+  tune(opts: SwarmTuning): SwarmFn;
 }
 
 export interface CustomFunction {
@@ -159,6 +180,11 @@ export declare class Zissl {
   gradient(speed?: Param): Chain;
   solid(r?: Param, g?: Param, b?: Param, a?: Param): Chain;
   src(input: Output | Source): Chain;
+  /** The compute layer — see SwarmFn. */
+  swarm: SwarmFn;
+
+  /** Advance one frame by hand (autoLoop: false hosts). dt in milliseconds. */
+  tick(dtMs?: number): void;
 
   /** Show one output on the canvas, or the 2×2 grid of all four if omitted. */
   render(output?: Output): void;
