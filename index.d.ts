@@ -77,13 +77,37 @@ export declare class Output {
 
 export declare class Source {
   readonly i: number;
-  /** Bring your own media element / bitmap / canvas. */
-  init(opts: { src: HTMLVideoElement | HTMLCanvasElement | ImageBitmap | HTMLImageElement; dynamic?: boolean }): void;
+  /** Bring your own media element / bitmap / canvas / MediaStream. */
+  init(opts: { src: HTMLVideoElement | HTMLCanvasElement | ImageBitmap | HTMLImageElement | MediaStream; dynamic?: boolean }): void;
   initCam(deviceId?: string): Promise<void>;
   initVideo(url: string): Promise<void>;
   initImage(url: string): Promise<void>;
   initScreen(): Promise<void>;
   clear(): void;
+}
+
+/** A Strudel pattern: anything with queryArc (duck-typed, no dependency). */
+export interface PatternLike {
+  queryArc(begin: number, end: number): { value: unknown }[];
+}
+
+/** Hydra's `a` — audio reactivity via an AnalyserNode. */
+export declare class Audio {
+  /** Per-bin levels, 0..1. Use in params: `() => a.fft[0]`. */
+  readonly fft: number[];
+  /**
+   * init() → microphone. init({ source }) → a MediaStream, an
+   * HTMLMediaElement, or ANY AudioNode — e.g. zaltz's worklet node, so the
+   * visuals react to the engine's actual output, no mic loopback.
+   */
+  init(opts?: { source?: MediaStream | HTMLMediaElement | AudioNode }): Promise<this>;
+  setBins(n?: number): this;
+  setCutoff(c?: number): this;
+  setScale(s?: number): this;
+  setSmooth(s?: number): this;
+  /** Show / hide the little FFT bars overlay. */
+  show(): this;
+  hide(): this;
 }
 
 export interface ZisslOptions {
@@ -116,6 +140,10 @@ export declare class Zissl {
   /** Sequence tempo for array params, Hydra's `bpm` global (default 30). */
   bpm: number;
   mouse: { x: number; y: number };
+  /** Cap the render rate (frames per second); undefined = every RAF. */
+  fps: number | undefined;
+  /** Audio reactivity — Hydra's `a` (a.fft, setBins, show()…). */
+  a: Audio;
   /** Per-frame hook, called with dt in seconds. */
   update: ((dt: number) => void) | null;
   onerror: ((message: string) => void) | null;
@@ -139,6 +167,19 @@ export declare class Zissl {
   setResolution(width: number, height: number): void;
   /** Register a custom transform; the body is WGSL. */
   setFunction(fn: CustomFunction): void;
+  /**
+   * The Strudel bridge: set H's transport, in CYCLES — the same clock your
+   * audio engine plays from (e.g. `() => scheduler.now()`). Unset, H uses
+   * zissl's own clock (time · bpm/60).
+   */
+  setTime(fn: (() => number) | null): this;
+  /** Strudel pattern → per-frame param, sampled on the setTime transport.
+   *  (@strudel/hydra's H also works against zissl unchanged.) */
+  H(p: PatternLike | number | ((cycle: number) => number)): () => number;
+  /** Read an output's current frame as ImageData (defaults to the on-screen output). */
+  readPixels(output?: Output): Promise<ImageData>;
+  /** Hydra's screencap(): download the current frame as a PNG. */
+  screencap(): Promise<void>;
   /** Install the Hydra vocabulary on globalThis (or a target of your choice). */
   install(target?: object): this;
   dispose(): void;

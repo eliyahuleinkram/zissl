@@ -167,7 +167,10 @@ class Output {
       device.createTexture({
         size: [width, height],
         format: "rgba8unorm",
-        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        usage:
+          GPUTextureUsage.RENDER_ATTACHMENT |
+          GPUTextureUsage.TEXTURE_BINDING |
+          GPUTextureUsage.COPY_SRC,
       });
     this._texs?.forEach((t) => t.destroy());
     this._texs = [mk(), mk()];
@@ -200,8 +203,12 @@ class Source {
     this._w = w;
     this._h = h;
   }
-  /** Bring your own media: init({ src: videoOrCanvasOrBitmap, dynamic: true }). */
+  /** Bring your own media: init({ src: videoOrCanvasOrBitmapOrStream, dynamic: true }). */
   init({ src, dynamic = true } = {}) {
+    if (typeof MediaStream !== "undefined" && src instanceof MediaStream) {
+      this._stream(src);
+      return;
+    }
     this.media = src;
     this.dynamic = dynamic;
     this._tick(true);
@@ -267,6 +274,110 @@ class Source {
   }
 }
 
+/**
+ * Audio reactivity — Hydra's `a` object, WebAudio AnalyserNode under the hood
+ * (no Meyda dependency). a.fft[n] gives 0..1 per bin, with Hydra's knobs:
+ * setBins / setCutoff / setScale / setSmooth, show()/hide() overlay.
+ *
+ * The upgrade over Hydra: init() takes ANY source — nothing (microphone),
+ * a MediaStream, an HTMLMediaElement, or an AudioNode. Handing it an engine's
+ * output node (e.g. zaltz's AudioWorkletNode) makes the visuals react to the
+ * music itself, no mic loopback, sample-accurate to what's actually playing.
+ */
+class Audio {
+  constructor(z) {
+    this.z = z;
+    this.bins = 4;
+    this.cutoff = 2;
+    this.scale = 10;
+    this.smooth = 0.4;
+    this.max = 15;
+    this.fft = [0, 0, 0, 0];
+    this._prev = [0, 0, 0, 0];
+    this._analyser = null;
+    this._ctx = null;
+    this._canvas = null;
+  }
+  /** init() → microphone; init({ source }) → MediaStream | HTMLMediaElement |
+   *  AudioNode (analysed in its own context — nothing is rerouted). */
+  async init(opts = {}) {
+    const src = opts.source;
+    if (src && typeof src.connect === "function" && src.context) {
+      // an AudioNode — tap it where it lives
+      this._ctx = src.context;
+      this._owns = false;
+      this._analyser = this._ctx.createAnalyser();
+      src.connect(this._analyser);
+    } else {
+      this._ctx = new (window.AudioContext ?? window.webkitAudioContext)();
+      this._owns = true;
+      this._analyser = this._ctx.createAnalyser();
+      if (typeof HTMLMediaElement !== "undefined" && src instanceof HTMLMediaElement) {
+        const node = this._ctx.createMediaElementSource(src);
+        node.connect(this._analyser);
+        node.connect(this._ctx.destination);
+      } else {
+        const stream = src ?? (await navigator.mediaDevices.getUserMedia({ audio: true }));
+        this._ctx.createMediaStreamSource(stream).connect(this._analyser);
+      }
+      this._ctx.resume?.().catch(() => {});
+    }
+    this._analyser.fftSize = 1024;
+    this._analyser.smoothingTimeConstant = 0; // we smooth ourselves, Hydra-style
+    this._data = new Uint8Array(this._analyser.frequencyBinCount);
+    this.setBins(this.bins);
+    return this;
+  }
+  setBins(n = 4) {
+    this.bins = n;
+    this.fft = new Array(n).fill(0);
+    this._prev = new Array(n).fill(0);
+    return this;
+  }
+  setCutoff(c = 2) { this.cutoff = c; return this; }
+  setScale(s = 10) { this.scale = s; return this; }
+  setSmooth(s = 0.4) { this.smooth = s; return this; }
+  show() {
+    if (!this._canvas) {
+      const c = document.createElement("canvas");
+      c.width = 100;
+      c.height = 80;
+      c.style.cssText = "position:fixed;right:8px;bottom:8px;background:rgba(0,0,0,.5);z-index:10";
+      document.body.appendChild(c);
+      this._canvas = c;
+    }
+    this._canvas.style.display = "block";
+    return this;
+  }
+  hide() {
+    if (this._canvas) this._canvas.style.display = "none";
+    return this;
+  }
+  _tick() {
+    if (!this._analyser) return;
+    this._analyser.getByteFrequencyData(this._data);
+    const chunk = Math.floor(this._data.length / this.bins) || 1;
+    for (let i = 0; i < this.bins; i++) {
+      let sum = 0;
+      for (let k = 0; k < chunk; k++) sum += this._data[i * chunk + k];
+      const loud = (sum / chunk / 255) * this.max; // ≈ Hydra's sones range
+      const sm = (this._prev[i] ?? 0) * this.smooth + loud * (1 - this.smooth);
+      this._prev[i] = sm;
+      this.fft[i] = Math.max(0, Math.min(1, (sm - this.cutoff) / this.scale));
+    }
+    if (this._canvas && this._canvas.style.display !== "none") {
+      const g = this._canvas.getContext("2d");
+      const { width: w, height: h } = this._canvas;
+      g.clearRect(0, 0, w, h);
+      g.fillStyle = "#7c63ff";
+      const bw = w / this.bins;
+      for (let i = 0; i < this.bins; i++) {
+        g.fillRect(i * bw + 1, h - this.fft[i] * h, bw - 2, this.fft[i] * h);
+      }
+    }
+  }
+}
+
 const BLIT_VS = `
 struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
 @vertex fn zvs(@builtin(vertex_index) vi: u32) -> VO {
@@ -318,9 +429,13 @@ export class Zissl {
     this.time = 0;
     this.speed = 1;
     this.bpm = 30;
+    this.fps = undefined; // set to cap the render rate, Hydra-style
     this.mouse = { x: 0, y: 0 };
     this.update = null; // per-frame hook: (dt seconds) => {}
     this.onerror = null;
+    this.a = new Audio(this);
+    this._timeFn = null; // external transport for H(), in cycles
+    this.H = this.H.bind(this);
     this._userFns = [];
     this._defs = new Map(DEFS.map((d) => [d[0], d]));
 
@@ -455,6 +570,83 @@ export class Zissl {
     }
   }
 
+  /**
+   * THE STRUDEL BRIDGE. Point H's transport at your scheduler's clock, in
+   * CYCLES — the same clock your audio engine plays from — and every H(pat)
+   * param samples the pattern at that exact musical moment, frame by frame:
+   *
+   *   z.setTime(() => scheduler.now());          // cycles
+   *   osc(4, 0, 1).rotate(H(saw.slow(8))).out(o0);
+   *
+   * Unset, H falls back to zissl's own clock (time · bpm/60). Note that
+   * @strudel/hydra's H also works against zissl UNCHANGED — its thunks are
+   * valid params — this built-in just removes the dependency and the
+   * global-time plumbing.
+   */
+  setTime(fn) {
+    this._timeFn = typeof fn === "function" ? fn : null;
+    return this;
+  }
+
+  /** Strudel pattern (anything with queryArc) → per-frame param. Also accepts
+   *  a plain function of cycle time, or a number (passthrough). */
+  H(p) {
+    const now = () => (this._timeFn ? this._timeFn() : this.time * (this.bpm / 60));
+    if (typeof p === "number") return () => p;
+    if (p && typeof p.queryArc === "function") {
+      return () => {
+        const t = now();
+        const hap = p.queryArc(t, t)[0];
+        const val = hap && hap.value;
+        return typeof val === "number" ? val : Number(val) || 0;
+      };
+    }
+    if (typeof p === "function") return () => Number(p(now())) || 0;
+    return () => 0;
+  }
+
+  /** Read an output's current frame as ImageData (defaults to what's on
+   *  screen). This is the honest pixel path — WebGPU canvases don't readback
+   *  through 2d drawImage — and the future golden-gate harness against Hydra. */
+  async readPixels(output) {
+    const o = output ?? this._renderOut ?? this.o0;
+    const { device, width, height } = this;
+    const bpr = Math.ceil((width * 4) / 256) * 256;
+    const buf = device.createBuffer({
+      size: bpr * height,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = device.createCommandEncoder();
+    encoder.copyTextureToBuffer(
+      { texture: o._texs[o._front] },
+      { buffer: buf, bytesPerRow: bpr, rowsPerImage: height },
+      [width, height]
+    );
+    device.queue.submit([encoder.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const src = new Uint8Array(buf.getMappedRange());
+    const out = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      out.set(src.subarray(y * bpr, y * bpr + width * 4), y * width * 4);
+    }
+    buf.unmap();
+    buf.destroy();
+    return new ImageData(out, width, height);
+  }
+
+  /** Hydra's screencap(): download the current frame as a PNG. */
+  async screencap() {
+    const img = await this.readPixels();
+    const c = document.createElement("canvas");
+    c.width = img.width;
+    c.height = img.height;
+    c.getContext("2d").putImageData(img, 0, 0);
+    const link = document.createElement("a");
+    link.download = `zissl-${Date.now()}.png`;
+    link.href = c.toDataURL("image/png");
+    link.click();
+  }
+
   /** Hydra mode: put the whole vocabulary on globalThis (or your own object). */
   install(target = globalThis) {
     this._installed = target;
@@ -464,12 +656,17 @@ export class Zissl {
     target.hush = () => this.hush();
     target.setResolution = (w, h) => this.setResolution(w, h);
     target.setFunction = (d) => this.setFunction(d);
+    target.setTime = (fn) => this.setTime(fn);
+    target.screencap = () => this.screencap();
+    target.a = this.a;
+    target.H = this.H;
     target.zissl = this;
     const z = this;
     for (const [k, get, set] of [
       ["time", () => z.time, (v) => (z.time = v)],
       ["speed", () => z.speed, (v) => (z.speed = v)],
       ["bpm", () => z.bpm, (v) => (z.bpm = v)],
+      ["fps", () => z.fps, (v) => (z.fps = v)],
       ["mouse", () => z.mouse, undefined],
       ["width", () => z.width, undefined],
       ["height", () => z.height, undefined],
@@ -486,6 +683,8 @@ export class Zissl {
     this._running = false;
     cancelAnimationFrame(this._raf);
     window.removeEventListener("pointermove", this._onMouse);
+    if (this.a._owns) this.a._ctx?.close?.().catch(() => {});
+    this.a._canvas?.remove();
     this.device.destroy();
   }
 
@@ -655,10 +854,13 @@ ${lines.map((l) => "  " + l).join("\n")}
   _frame(tms) {
     if (!this._running) return;
     this._raf = requestAnimationFrame((t) => this._frame(t));
+    // fps cap: skip the frame entirely; dt accrues so time stays truthful
+    if (this.fps && this._last && tms - this._last < 1000 / this.fps - 0.5) return;
 
     const dt = this._last ? (tms - this._last) / 1000 : 0;
     this._last = tms;
     this.time += dt * this.speed;
+    this.a._tick();
     if (this.update) this.update(dt);
 
     const ctx = {

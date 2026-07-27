@@ -98,8 +98,50 @@ z.setFunction({
 });
 ```
 
-Not here yet, said plainly: audio reactivity (`a.fft`) and the p5/extension
-ecosystem. The language core is complete.
+Audio reactivity is Hydra's `a`, with one upgrade: `a.init()` listens to the
+microphone like Hydra, but `a.init({ source })` taps **any** MediaStream,
+media element, or WebAudio node — hand it your engine's output node and the
+visuals react to what's actually playing, no mic loopback:
+
+```js
+a.init({ source: zaltzEngine.node }); // zaltz's AudioWorkletNode — or any AudioNode
+osc(10).brightness(() => a.fft[0]).out(o0);
+a.setBins(6).setSmooth(0.7); a.show(); // the familiar knobs + bars overlay
+```
+
+Also aboard: `fps` (render-rate cap), `screencap()` (PNG of the current
+frame), `readPixels()` (honest ImageData readback — WebGPU canvases don't
+readback through 2d `drawImage`; this is also the future pixel-diff harness
+against Hydra's renders).
+
+Not here yet, said plainly: the p5/GLSL extension ecosystem — `setFunction`
+speaks WGSL, not GLSL. The language core is complete.
+
+## Strudel — the H method
+
+This is the pairing zissl was born for. In
+[Klappn](https://klappn.com)'s live sets, *all* motion comes from `H(pat)` —
+a Strudel pattern sampled on the transport clock, in cycles, so the picture
+is locked to the music's own time, not the wall's. zissl builds that bridge
+in:
+
+```js
+const z = await Zissl.create({ canvas, makeGlobal: true });
+
+z.setTime(() => scheduler.now());   // your transport, in CYCLES —
+                                    // the same clock zaltz plays from
+
+osc(4, 0, 1)                        // Hydra's own clocks frozen (explicit 0s)…
+  .rotate(H(saw.slow(8)))           // …ALL motion rides the pattern
+  .scale(H("<1 1.5 2>"))            // works with anything that has queryArc
+  .out(o0);
+```
+
+`H()` duck-types: a Strudel pattern (anything with `queryArc`), a plain
+function of cycle time, or a number. No `@strudel/*` dependency — and if you
+already use `@strudel/hydra`, its `H` works against zissl **unchanged**,
+because zissl params accept the same zero-arg thunks. Strudel's `feedStrudel`
+trick works too: `s0.init({ src: strudelDrawCanvas })`.
 
 ## Try it
 
