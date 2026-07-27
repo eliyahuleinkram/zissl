@@ -398,8 +398,13 @@ class Swarm {
     this.turn = 1;
     this.senseAng = 0.4;
     this.senseDist = 9;
-    this.decay = 0.96;
-    this.deposit = 0.35;
+    this.decay = 0.92;
+    // Relative deposit: 1.0 holds the field's mean around ~0.35 at ANY agent
+    // count, resolution or decay (see _tick) — lanes concentrate 10–100× the
+    // mean and clamp bright; the background falls dark. Without this
+    // normalization a fresh uniform colony saturates the whole field before
+    // lanes can form, and a flat field has no gradients to follow — a trap.
+    this.deposit = 1;
     this.steerAmt = 1.2;
     this.steer = null;
     this._front = 0;
@@ -490,7 +495,8 @@ ${LIB}`;
     const u = this._ucpu;
     u[0] = this.count; u[1] = this._w; u[2] = this._h; u[3] = Math.min(dt || 0.016, 0.1);
     u[4] = this.speed; u[5] = this.turn; u[6] = this.senseAng; u[7] = this.senseDist;
-    u[8] = this.decay; u[9] = this.deposit;
+    u[8] = this.decay;
+    u[9] = this.deposit * 0.35 * (1 - this.decay) * ((this._w * this._h) / this.count);
     u[10] = this.steer ? this.steerAmt : 0;
     u[11] = this.z.time;
     device.queue.writeBuffer(this._ubuf, 0, u);

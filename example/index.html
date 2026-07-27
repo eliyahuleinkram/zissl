@@ -101,7 +101,6 @@ render();`,
 
 `// one million agents, on compute — the part WebGL never had
 osc(6, 0.08, 1.4).kaleid(5).rotate(0, 0.02).out(o0);
-swarm.tune({ deposit: 0.22, decay: 0.9, senseAng: 0.6, senseDist: 12, steerAmt: 0.9 });
 swarm(1000000, o0, 1.4, 1.6)
   .color(0.45, 0.8, 1.5)
   .add(src(o0).brightness(-0.42), 0.35)
