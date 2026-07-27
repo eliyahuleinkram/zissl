@@ -62,6 +62,7 @@
     <button data-p="1">feedback</button>
     <button data-p="2">modulate</button>
     <button data-p="3">grid</button>
+    <button data-p="4">swarm</button>
     <span class="hint">⌘⏎ runs</span>
   </div>
   <div class="err" id="err"></div>
@@ -97,6 +98,15 @@ noise(4, 0.2).thresh(0.4, 0.1).out(o1);
 voronoi(8, 0.5).colorama(0.008).out(o2);
 shape(5, 0.4, 0.05).repeat(4, 3).rotate(0, 0.15).out(o3);
 render();`,
+
+`// one million agents, on compute — the part WebGL never had
+osc(6, 0.08, 1.4).kaleid(5).rotate(0, 0.02).out(o0);
+swarm.tune({ deposit: 0.22, decay: 0.9, senseAng: 0.6, senseDist: 12, steerAmt: 0.9 });
+swarm(1000000, o0, 1.4, 1.6)
+  .color(0.45, 0.8, 1.5)
+  .add(src(o0).brightness(-0.42), 0.35)
+  .out(o1);
+render(o1);`,
 ];
 
 const code = document.getElementById("code");

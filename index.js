@@ -378,6 +378,155 @@ class Audio {
   }
 }
 
+/**
+ * THE SWARM — zissl's proof that the new machine matters. A physarum colony
+ * on compute shaders: agents in storage buffers sense the trail field AND the
+ * living picture (any output), steer toward light, deposit as they walk; a
+ * blur/decay pass grows the deposits into filaments. The trail feeds back
+ * into the language as an ordinary source. Hydra's WebGL has no compute —
+ * this layer is simply outside its physics.
+ *
+ * One system per synth (like Hydra's one `a`): swarm(...) configures it and
+ * returns a chain sampling its trail.
+ */
+class Swarm {
+  constructor(z) {
+    this.z = z;
+    this.active = false;
+    this.count = 0;
+    this.speed = 1;
+    this.turn = 1;
+    this.senseAng = 0.4;
+    this.senseDist = 9;
+    this.decay = 0.96;
+    this.deposit = 0.35;
+    this.steerAmt = 1.2;
+    this.steer = null;
+    this._front = 0;
+  }
+  /** swarm(count, steer, speed, turn) — the language entry configures here. */
+  config(count, steer, speed, turn) {
+    const n = Math.max(1, Math.min(2_000_000, Math.floor(Number(count) || 200_000)));
+    if (!this._movePipe) this._build();
+    if (n !== this.count) this._makeAgents(n);
+    this.steer = steer ?? null;
+    if (speed != null) this.speed = Number(speed) || 1;
+    if (turn != null) this.turn = Number(turn) || 1;
+    this.active = true;
+  }
+  /** Sampled by chains like a Source; repeat sampler suits the toroidal field. */
+  get frontView() { return this._views?.[this._front]; }
+  _build() {
+    const { device } = this.z;
+    // Same one file of WGSL; kernels live at @group(1), invisible to render.
+    const code = `struct ZU {
+  res: vec2f, time: f32, bpm: f32, mouse: vec2f, pad0: vec2f, p: array<vec4f, 1>,
+}
+@group(0) @binding(0) var<uniform> U: ZU;
+${LIB}`;
+    const module = device.createShaderModule({ code });
+    this._movePipe = device.createComputePipeline({
+      layout: "auto",
+      compute: { module, entryPoint: "zk_move" },
+    });
+    this._blurPipe = device.createComputePipeline({
+      layout: "auto",
+      compute: { module, entryPoint: "zk_blur" },
+    });
+    this._ubuf = device.createBuffer({
+      size: 48,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this._ucpu = new Float32Array(12);
+    this._black = device.createTexture({
+      size: [1, 1],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this._blackView = this._black.createView();
+    this._alloc();
+  }
+  _alloc() {
+    const { device, width, height } = this.z;
+    this._texs?.forEach((t) => t.destroy());
+    this._fieldBuf?.destroy();
+    this._texs = [0, 1].map(() =>
+      device.createTexture({
+        size: [width, height],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+      })
+    );
+    this._views = this._texs.map((t) => t.createView());
+    this._fieldBuf = device.createBuffer({
+      size: width * height * 4,
+      usage: GPUBufferUsage.STORAGE,
+    });
+    this._w = width;
+    this._h = height;
+    this._front = 0;
+  }
+  _makeAgents(n) {
+    const { device, width, height } = this.z;
+    this._agentBuf?.destroy();
+    const data = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      data[i * 4] = Math.random() * width;
+      data[i * 4 + 1] = Math.random() * height;
+      data[i * 4 + 2] = Math.random() * Math.PI * 2;
+      data[i * 4 + 3] = Math.random();
+    }
+    this._agentBuf = device.createBuffer({
+      size: data.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(this._agentBuf, 0, data);
+    this.count = n;
+  }
+  _tick(encoder, dt) {
+    if (!this.active || !this.count) return;
+    if (this._w !== this.z.width || this._h !== this.z.height) this._alloc();
+    const { device } = this.z;
+    const u = this._ucpu;
+    u[0] = this.count; u[1] = this._w; u[2] = this._h; u[3] = Math.min(dt || 0.016, 0.1);
+    u[4] = this.speed; u[5] = this.turn; u[6] = this.senseAng; u[7] = this.senseDist;
+    u[8] = this.decay; u[9] = this.deposit;
+    u[10] = this.steer ? this.steerAmt : 0;
+    u[11] = this.z.time;
+    device.queue.writeBuffer(this._ubuf, 0, u);
+    const steerView =
+      (this.steer && (this.steer.frontView ?? this.steer.view)) ?? this._blackView;
+    const moveBind = device.createBindGroup({
+      layout: this._movePipe.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: { buffer: this._ubuf } },
+        { binding: 1, resource: { buffer: this._agentBuf } },
+        { binding: 2, resource: { buffer: this._fieldBuf } },
+        { binding: 3, resource: this._views[this._front] },
+        { binding: 5, resource: steerView },
+      ],
+    });
+    const blurBind = device.createBindGroup({
+      layout: this._blurPipe.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: { buffer: this._ubuf } },
+        { binding: 2, resource: { buffer: this._fieldBuf } },
+        { binding: 3, resource: this._views[this._front] },
+        { binding: 4, resource: this._views[1 - this._front] },
+      ],
+    });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this._movePipe);
+    pass.setBindGroup(1, moveBind);
+    pass.dispatchWorkgroups(Math.ceil(this.count / 256));
+    pass.setPipeline(this._blurPipe);
+    pass.setBindGroup(1, blurBind);
+    pass.dispatchWorkgroups(Math.ceil(this._w / 8), Math.ceil(this._h / 8));
+    pass.end();
+    this._front = 1 - this._front;
+  }
+}
+
 const BLIT_VS = `
 struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
 @vertex fn zvs(@builtin(vertex_index) vi: u32) -> VO {
@@ -469,6 +618,20 @@ export class Zissl {
       this[name] = (...args) => new Chain(this, { def, args });
     }
 
+    // The compute layer: one swarm per synth, spoken as a source.
+    this._swarmSys = new Swarm(this);
+    this.swarm = (count, steer, speed, turn) => {
+      this._swarmSys.config(count, steer, speed, turn);
+      return this.src(this._swarmSys);
+    };
+    // the deeper knobs: swarm.tune({ deposit, decay, senseAng, senseDist, steerAmt })
+    this.swarm.tune = (opts = {}) => {
+      for (const k of ["deposit", "decay", "senseAng", "senseDist", "steerAmt", "speed", "turn"]) {
+        if (typeof opts[k] === "number") this._swarmSys[k] = opts[k];
+      }
+      return this.swarm;
+    };
+
     const blitOne = device.createShaderModule({ code: BLIT_ONE });
     const blitFour = device.createShaderModule({ code: BLIT_FOUR });
     const mkBlit = (module) =>
@@ -499,7 +662,10 @@ export class Zissl {
 
     this._running = true;
     this._last = 0;
-    this._raf = requestAnimationFrame((t) => this._frame(t));
+    // autoLoop: false hands the clock to the host — drive with z.tick(dtMs).
+    // (Hydra has the same switch, for hosts that own their render loop.)
+    this._autoLoop = opts.autoLoop !== false;
+    if (this._autoLoop) this._raf = requestAnimationFrame((t) => this._frame(t));
   }
 
   /**
@@ -540,6 +706,7 @@ export class Zissl {
       o.program = null;
       o._clear = true;
     }
+    this._swarmSys.active = false; // sketches re-arm it by calling swarm()
   }
 
   setResolution(width, height) {
@@ -651,6 +818,7 @@ export class Zissl {
   install(target = globalThis) {
     this._installed = target;
     for (const def of DEFS) if (def[1] === "src") target[def[0]] = this[def[0]];
+    target.swarm = this.swarm;
     for (const k of ["o0", "o1", "o2", "o3", "s0", "s1", "s2", "s3"]) target[k] = this[k];
     target.render = (o) => this.render(o);
     target.hush = () => this.hush();
@@ -735,7 +903,7 @@ export class Zissl {
 
     const emitArg = (x, stv) => {
       if (x instanceof Chain) return emitNode(x.stack, x.stack.length - 1, stv);
-      if (x instanceof Output || x instanceof Source) {
+      if (x instanceof Output || x instanceof Source || x instanceof Swarm) {
         const c = `v${v++}`;
         lines.push(`let ${c} = ${emitTex(x, stv)};`);
         return c;
@@ -751,8 +919,8 @@ export class Zissl {
           const c = `v${v++}`;
           if (name === "src") {
             const ref = args[0];
-            if (!(ref instanceof Output || ref instanceof Source)) {
-              throw new Error("zissl: src() takes an output (o0..o3) or source (s0..s3)");
+            if (!(ref instanceof Output || ref instanceof Source || ref instanceof Swarm)) {
+              throw new Error("zissl: src() takes an output (o0..o3), source (s0..s3) or the swarm");
             }
             lines.push(`let ${c} = ${emitTex(ref, stv)};`);
           } else if (name === "solid") {
@@ -856,10 +1024,23 @@ ${lines.map((l) => "  " + l).join("\n")}
     this._raf = requestAnimationFrame((t) => this._frame(t));
     // fps cap: skip the frame entirely; dt accrues so time stays truthful
     if (this.fps && this._last && tms - this._last < 1000 / this.fps - 0.5) return;
-
-    const dt = this._last ? (tms - this._last) / 1000 : 0;
+    const dtMs = this._last ? tms - this._last : 0;
     this._last = tms;
-    this.time += dt * this.speed;
+    this._step(dtMs);
+  }
+
+  /** Advance one frame by hand (autoLoop: false hosts). dt in milliseconds. */
+  tick(dtMs = 16.666) {
+    this._step(dtMs);
+  }
+
+  _step(dtMs) {
+    const dt = dtMs / 1000;
+    // A page global named `speed` is contested territory (Strudel stamps its
+    // control function over it) — never let a non-number poison the clock.
+    const sp = Number(this.speed);
+    this.time += dt * (Number.isFinite(sp) ? sp : 1);
+    if (!Number.isFinite(this.time)) this.time = 0;
     this.a._tick();
     if (this.update) this.update(dt);
 
@@ -875,6 +1056,7 @@ ${lines.map((l) => "  " + l).join("\n")}
 
     const device = this.device;
     const encoder = device.createCommandEncoder();
+    this._swarmSys._tick(encoder, dt); // compute first — chains sample fresh trail
     const drew = [];
 
     for (const o of this._outputs) {
@@ -909,7 +1091,7 @@ ${lines.map((l) => "  " + l).join("\n")}
           { binding: 2, resource: this.sampClamp },
           ...prog.texRefs.map((ref, i) => ({
             binding: 3 + i,
-            resource: ref instanceof Source ? ref.view : ref.frontView,
+            resource: ref.frontView ?? ref.view,
           })),
         ],
       });

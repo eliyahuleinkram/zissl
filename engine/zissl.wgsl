@@ -401,3 +401,106 @@ fn zm_modulateRotate(st: vec2f, c1: vec4f, multiple: f32, offset: f32) -> vec2f 
 fn zm_modulateHue(st: vec2f, c1: vec4f, amount: f32) -> vec2f {
   return st + (vec2f(c1.g - c1.r, c1.b - c1.g) * amount) / U.res;
 }
+
+// ---------------------------------------------------------------- compute
+// THE SWARM — the part Hydra's WebGL could never do. A physarum colony:
+// up to two million agents living in a storage buffer, each one sensing the
+// trail field AND the picture itself (any output/source, in `steer`), turning
+// toward light, depositing as it walks. A blur/decay pass turns the deposits
+// into glowing filaments; the trail texture then feeds back into the language
+// as an ordinary source — swarm(...).color(...).blend(src(o0)).out(o1).
+//
+// These bindings live at @group(1) and are referenced only by the kernels, so
+// every render pipeline compiled from this same file ignores them entirely.
+
+struct ZAgent { x: f32, y: f32, ang: f32, seed: f32 }
+
+struct ZSwarmU {
+  countf: f32, w: f32, h: f32, dt: f32,
+  speed: f32, turn: f32, senseAng: f32, senseDist: f32,
+  decay: f32, deposit: f32, steerAmt: f32, t: f32,
+}
+
+@group(1) @binding(0) var<uniform> SU: ZSwarmU;
+@group(1) @binding(1) var<storage, read_write> zsw_agents: array<ZAgent>;
+@group(1) @binding(2) var<storage, read_write> zsw_field: array<atomic<u32>>;
+@group(1) @binding(3) var zsw_trailIn: texture_2d<f32>;
+@group(1) @binding(4) var zsw_trailOut: texture_storage_2d<rgba8unorm, write>;
+@group(1) @binding(5) var zsw_steer: texture_2d<f32>;
+
+fn z_hashf(n0: u32) -> f32 {
+  var n = n0;
+  n = n ^ (n << 13u);
+  n = n * 0x5bd1e995u;
+  n = n ^ (n >> 15u);
+  return f32(n & 0xffffffu) / 16777216.0;
+}
+
+// What an agent smells at p (pixel space): its own kind's trail, plus the
+// living picture underneath, weighted by steerAmt.
+fn zsw_sense(p: vec2f) -> f32 {
+  let w = SU.w;
+  let h = SU.h;
+  let x = i32(p.x - w * floor(p.x / w));
+  let y = i32(p.y - h * floor(p.y / h));
+  let trail = textureLoad(zsw_trailIn, vec2i(x, y), 0).r;
+  let sd = vec2f(textureDimensions(zsw_steer));
+  let sp = clamp(vec2f(f32(x), f32(y)) / vec2f(w, h) * sd, vec2f(0.0), sd - 1.0);
+  let food = z_lum(textureLoad(zsw_steer, vec2i(sp), 0).rgb);
+  return trail + food * SU.steerAmt;
+}
+
+@compute @workgroup_size(256)
+fn zk_move(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (f32(i) >= SU.countf) { return; }
+  var a = zsw_agents[i];
+  let pos = vec2f(a.x, a.y);
+  let d = SU.senseDist;
+  let ahead = zsw_sense(pos + vec2f(cos(a.ang), sin(a.ang)) * d);
+  let left = zsw_sense(pos + vec2f(cos(a.ang + SU.senseAng), sin(a.ang + SU.senseAng)) * d);
+  let right = zsw_sense(pos + vec2f(cos(a.ang - SU.senseAng), sin(a.ang - SU.senseAng)) * d);
+  let rnd = z_hashf(i * 747796405u + u32(SU.t * 6000.0));
+  var ang = a.ang;
+  let ta = SU.turn * SU.dt * 9.0;
+  if (ahead >= left && ahead >= right) {
+    // keep going — jitter only
+  } else if (left > right) {
+    ang += ta;
+  } else if (right > left) {
+    ang -= ta;
+  } else {
+    ang += (rnd - 0.5) * 2.0 * ta;
+  }
+  ang += (rnd - 0.5) * 0.25 * ta;
+  var np = pos + vec2f(cos(ang), sin(ang)) * SU.speed * SU.dt * 60.0;
+  np.x = np.x - SU.w * floor(np.x / SU.w);
+  np.y = np.y - SU.h * floor(np.y / SU.h);
+  a.x = np.x;
+  a.y = np.y;
+  a.ang = ang;
+  zsw_agents[i] = a;
+  let px = u32(clamp(np.x, 0.0, SU.w - 1.0));
+  let py = u32(clamp(np.y, 0.0, SU.h - 1.0));
+  atomicAdd(&zsw_field[py * u32(SU.w) + px], u32(SU.deposit * 256.0));
+}
+
+@compute @workgroup_size(8, 8)
+fn zk_blur(@builtin(global_invocation_id) gid: vec3u) {
+  let w = i32(SU.w);
+  let h = i32(SU.h);
+  let x = i32(gid.x);
+  let y = i32(gid.y);
+  if (x >= w || y >= h) { return; }
+  var sum = 0.0;
+  for (var j: i32 = -1; j <= 1; j++) {
+    for (var k: i32 = -1; k <= 1; k++) {
+      let xx = (x + k + w) % w;
+      let yy = (y + j + h) % h;
+      sum = sum + textureLoad(zsw_trailIn, vec2i(xx, yy), 0).r;
+    }
+  }
+  let dep = f32(atomicExchange(&zsw_field[u32(y * w + x)], 0u)) / 256.0;
+  let v = clamp((sum / 9.0) * SU.decay + dep, 0.0, 1.0);
+  textureStore(zsw_trailOut, vec2i(x, y), vec4f(v, v, v, 1.0));
+}
