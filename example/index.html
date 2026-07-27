@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>zissl — Hydra on WebGPU</title>
+<link rel="icon" href="../zissl-icon.svg" type="image/svg+xml" />
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #0a0a0f;
+    color: #e8e6f2;
+    font: 14px/1.45 ui-monospace, "SF Mono", Menlo, monospace;
+    overflow: hidden;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .panel {
+    position: fixed; left: 20px; bottom: 20px;
+    width: min(560px, calc(100vw - 40px));
+    background: rgba(10, 10, 16, 0.82);
+    backdrop-filter: blur(14px);
+    border: 1px solid rgba(124, 99, 255, 0.35);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+  .head b { font-size: 15px; letter-spacing: 0.06em; color: #b9aaff; }
+  .head span { color: #6f6a85; font-size: 12px; }
+  textarea {
+    width: 100%; height: 132px; resize: vertical;
+    background: transparent; color: #e8e6f2;
+    border: none; outline: none;
+    font: inherit; tab-size: 2;
+  }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  button {
+    background: transparent; color: #b9aaff;
+    border: 1px solid rgba(124, 99, 255, 0.5);
+    border-radius: 6px; padding: 5px 12px;
+    font: inherit; cursor: pointer;
+  }
+  button:hover { background: rgba(124, 99, 255, 0.15); }
+  button.run { color: #0a0a0f; background: #7c63ff; border-color: #7c63ff; }
+  button.run:hover { background: #9280ff; }
+  .hint { color: #6f6a85; font-size: 12px; margin-left: auto; }
+  .err {
+    margin-top: 8px; color: #ff8da3; font-size: 12px;
+    white-space: pre-wrap; max-height: 90px; overflow: auto; display: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="panel">
+  <div class="head"><b>zissl</b><span>Hydra's language, WebGPU's machine</span></div>
+  <textarea id="code" spellcheck="false"></textarea>
+  <div class="row">
+    <button class="run" id="run">run</button>
+    <button data-p="0">osc</button>
+    <button data-p="1">feedback</button>
+    <button data-p="2">modulate</button>
+    <button data-p="3">grid</button>
+    <span class="hint">⌘⏎ runs</span>
+  </div>
+  <div class="err" id="err"></div>
+</div>
+<script type="module">
+import Zissl from "../index.js";
+
+const PRESETS = [
+`osc(10, 0.1, 1.4)
+  .kaleid(5)
+  .rotate(0, 0.1)
+  .out(o0);
+render(o0);`,
+
+`osc(10, 0.1, 1.4)
+  .kaleid(5)
+  .modulate(noise(3), 0.05)
+  .blend(src(o0), 0.72)
+  .rotate(0, 0.04)
+  .out(o0);
+render(o0);`,
+
+`voronoi(6, 0.3)
+  .modulate(noise(3), 0.2)
+  .color(0.55, 0.75, 1.1)
+  .contrast(1.4)
+  .modulateRotate(osc(2, 0.2), 0.4)
+  .out(o0);
+render(o0);`,
+
+`osc(30, 0.05, 1.2).out(o0);
+noise(4, 0.2).thresh(0.4, 0.1).out(o1);
+voronoi(8, 0.5).colorama(0.008).out(o2);
+shape(5, 0.4, 0.05).repeat(4, 3).rotate(0, 0.15).out(o3);
+render();`,
+];
+
+const code = document.getElementById("code");
+const err = document.getElementById("err");
+code.value = PRESETS[1];
+
+const canvas = document.getElementById("c");
+let z;
+try {
+  z = await Zissl.create({ canvas, width: 1280, height: 720, makeGlobal: true });
+  z.onerror = (m) => { err.style.display = "block"; err.textContent = m; };
+} catch (e) {
+  err.style.display = "block";
+  err.textContent = String(e);
+  throw e;
+}
+
+function run() {
+  err.style.display = "none";
+  try {
+    new Function(code.value)();
+  } catch (e) {
+    err.style.display = "block";
+    err.textContent = String(e);
+  }
+}
+
+document.getElementById("run").onclick = run;
+document.querySelectorAll("[data-p]").forEach((b) => {
+  b.onclick = () => { code.value = PRESETS[+b.dataset.p]; run(); };
+});
+code.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); }
+});
+
+run();
+</script>
+</body>
+</html>

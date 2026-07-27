@@ -1,0 +1,43 @@
+{
+  "name": "zissl",
+  "version": "0.1.0",
+  "description": "The whole video synth in one file of WGSL — a Hydra-compatible engine on WebGPU.",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./wgsl": "./dist/zissl.wgsl.js"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "dist/",
+    "engine/",
+    "NOTICE.md"
+  ],
+  "scripts": {
+    "build": "cd engine && ./build.sh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eliyahuleinkram/zissl.git"
+  },
+  "bugs": "https://github.com/eliyahuleinkram/zissl/issues",
+  "keywords": [
+    "video-synth",
+    "webgpu",
+    "wgsl",
+    "hydra",
+    "hydra-synth",
+    "live-coding",
+    "visuals",
+    "shaders",
+    "creative-coding"
+  ],
+  "license": "AGPL-3.0-or-later",
+  "author": "Klappn (https://klappn.com)"
+}
