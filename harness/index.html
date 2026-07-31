@@ -37,6 +37,7 @@
 <script type="module">
 import Zissl from "../index.js";
 import { SKETCHES } from "./sketches.js";
+import { hydraRoster, zisslRoster, corpusCoverage, coverageVerdict } from "./coverage.js";
 
 const W = 256, H = 144;
 const DT = 16.666666;       // ms per warmup tick, both engines
@@ -52,6 +53,28 @@ const dCanvas = document.getElementById("dc");
 const results = document.getElementById("results");
 const summary = document.getElementById("summary");
 
+// THE SELF-TEST (?mutate=<sketch>): a gate that cannot fail proves nothing. Ask
+// for it and the named sketch is rendered by zissl with one parameter nudged —
+// the runner then asserts that this sketch, and only this sketch, FAILS.
+const MUTATE = new URLSearchParams(location.search).get("mutate");
+
+// The external source both engines are fed: one canvas, painted by hand, at
+// exactly the render size so no sampler filtering can enter the comparison.
+function makeSourceCanvas() {
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  for (let y = 0; y < H; y += 16) {
+    for (let x = 0; x < W; x += 16) {
+      const on = ((x / 16) + (y / 16)) % 2 === 0;
+      g.fillStyle = on ? `rgb(${(x / W) * 255 | 0},${(y / H) * 255 | 0},200)` : "#101020";
+      g.fillRect(x, y, 16, 16);
+    }
+  }
+  return c;
+}
+const SOURCE_CANVAS = makeSourceCanvas();
+
 // --- hydra (reference) -------------------------------------------------
 const hydra = new Hydra({
   canvas: hCanvas, width: W, height: H,
@@ -60,9 +83,14 @@ const hydra = new Hydra({
 const hs = hydra.synth;
 const gl = hCanvas.getContext("webgl2") ?? hCanvas.getContext("webgl");
 
+hs.bpm = 30; // pinned: array sequencing reads time · speed · (bpm/60)
+hs.s0.init({ src: SOURCE_CANVAS, dynamic: false });
+
 function renderHydra(sketch, warm = WARM) {
   hs.hush();
   hs.speed = 1;
+  hs.bpm = 30;
+  hs.s0.init({ src: SOURCE_CANVAS, dynamic: false }); // hydra's hush() clears sources
   // hush() swaps programs but leaves the last picture in the ping-pong fbos —
   // flush BOTH buffers to black so every sketch starts from the same silence.
   for (let i = 0; i < 2; i++) hydra.tick(DT);
@@ -80,12 +108,19 @@ function renderHydra(sketch, warm = WARM) {
 
 // --- zissl (candidate) -------------------------------------------------
 const z = await Zissl.create({ canvas: zCanvas, width: W, height: H, autoLoop: false });
+z.bpm = 30;
+z.s0.init({ src: SOURCE_CANVAS, dynamic: false });
 
-async function renderZissl(sketch, warm = WARM) {
+async function renderZissl(sketch, warm = WARM, mutate = false) {
   z.hush();
   z.speed = 1;
+  z.bpm = 30;
+  z.s0.init({ src: SOURCE_CANVAS, dynamic: false });
   for (let i = 0; i < 2; i++) z.tick(DT); // symmetric flush (zissl hush clears on next tick)
   sketch(z);
+  // The self-test's nudge: one output, one extra transform, small enough that
+  // only a gate with real sensitivity notices it.
+  if (mutate) z.src(z.o0).brightness(0.06).out(z.o0);
   z.render(z.o0);
   await z.ready(); // .out() compiles async — tick only when the program is live
   z.time = T0;
@@ -127,35 +162,90 @@ function showDiff(a, b) {
   d.putImageData(img, 0, 0);
 }
 
+// --- the coverage contract ---------------------------------------------
+// Derived, never declared: hydra's own source file, the live engine's surface,
+// and what the corpus actually calls.
+let coverage = { pass: false, missing: [], untested: [], extras: [], total: 0, err: null };
+try {
+  const src = await fetch("../node_modules/hydra-synth/src/glsl/glsl-functions.js").then((r) => r.text());
+  const roster = hydraRoster(src);
+  if (roster.size < 40) throw new Error(`roster looks wrong (${roster.size} functions) — did hydra-synth move?`);
+  coverage = coverageVerdict({
+    roster,
+    speaks: zisslRoster(z),
+    covered: corpusCoverage(SKETCHES),
+  });
+} catch (e) {
+  coverage.err = String(e).slice(0, 160);
+}
+
 // --- run ---------------------------------------------------------------
+const mean = (a) => {
+  let s = 0;
+  for (let i = 0; i < a.length; i += 4) s += (a[i] + a[i + 1] + a[i + 2]) / 3;
+  return s / (a.length / 4);
+};
+
 const rows = [];
 for (const [name, sketch, opts] of SKETCHES) {
   let verdict;
   try {
     const ha = renderHydra(sketch, opts?.warm);
-    const za = await renderZissl(sketch, opts?.warm);
+    const za = await renderZissl(sketch, opts?.warm, MUTATE === name);
     showDiff(ha, za);
     const m = compare(ha, za);
-    const pass = m.mae <= MAE_PASS && m.corr >= CORR_PASS && m.hotFrac <= HOT_PASS;
-    verdict = { name, ...m, pass };
+    if (opts?.beyond) {
+      // BEYOND HYDRA: hydra can't render this at all (its shader doesn't
+      // compile — the canvas stays black). The claim under test is that ours
+      // paints, and that where a twin spelling exists the two agree exactly.
+      const hydraBlack = mean(ha) < 0.5;
+      const zisslPaints = mean(za) > 0.5;
+      let twinMae = null;
+      if (opts.twin) twinMae = compare(za, await renderZissl(opts.twin, opts.warm)).mae;
+      verdict = {
+        name, ...m, kind: "beyond", note: opts.beyond,
+        hydraBlack, zisslPaints, twinMae,
+        pass: hydraBlack && zisslPaints && (twinMae === null || twinMae <= MAE_PASS),
+      };
+    } else if (opts?.divergence) {
+      // A NAMED, DELIBERATE DIFFERENCE: ours must paint, and must equal the
+      // twin that spells our semantics out loud.
+      const twinMae = opts.twin ? compare(za, await renderZissl(opts.twin, opts.warm)).mae : null;
+      verdict = {
+        name, ...m, kind: "divergence", note: opts.divergence, twinMae,
+        pass: mean(za) > 0.5 && (twinMae === null || twinMae <= MAE_PASS),
+      };
+    } else {
+      verdict = { name, ...m, kind: "match", pass: m.mae <= MAE_PASS && m.corr >= CORR_PASS && m.hotFrac <= HOT_PASS };
+    }
   } catch (e) {
-    verdict = { name, mae: NaN, corr: NaN, hotFrac: NaN, pass: false, err: String(e).slice(0, 120) };
+    verdict = { name, mae: NaN, corr: NaN, hotFrac: NaN, kind: "match", pass: false, err: String(e).slice(0, 120) };
   }
   rows.push(verdict);
   const tr = document.createElement("tr");
+  const label =
+    verdict.kind === "beyond" ? "beyond hydra" : verdict.kind === "divergence" ? "ours, by design" : "pass";
   tr.innerHTML = `<td>${verdict.name}</td>
     <td class="num">${verdict.mae.toFixed(2)}</td>
     <td class="num">${verdict.corr.toFixed(4)}</td>
     <td class="num">${(verdict.hotFrac * 100).toFixed(2)}%</td>
-    <td class="${verdict.pass ? "pass" : "fail"}">${verdict.pass ? "pass" : "FAIL"}${verdict.err ? " — " + verdict.err : ""}</td>`;
+    <td class="${verdict.pass ? "pass" : "fail"}">${verdict.pass ? label : "FAIL"}${verdict.err ? " — " + verdict.err : ""}</td>`;
   results.appendChild(tr);
   summary.textContent = `${rows.filter((r) => r.pass).length}/${rows.length} pass…`;
 }
 const passed = rows.filter((r) => r.pass).length;
 const worst = rows.filter((r) => !isNaN(r.mae)).sort((x, y) => y.mae - x.mae)[0];
+const covLine = coverage.err
+  ? `<span class="fail">coverage contract errored — ${coverage.err}</span>`
+  : coverage.pass
+    ? `<span class="pass">coverage ${coverage.total}/${coverage.total} of hydra's roster, all exercised</span>`
+    : `<span class="fail">coverage FAIL — missing: ${coverage.missing.join(", ") || "none"} · untested: ${coverage.untested.join(", ") || "none"}</span>`;
 summary.innerHTML = `<b class="${passed === rows.length ? "pass" : "fail"}">${passed}/${rows.length} pass</b>` +
-  (worst ? ` — worst MAE ${worst.mae.toFixed(2)} (${worst.name})` : "");
+  (worst ? ` — worst MAE ${worst.mae.toFixed(2)} (${worst.name})` : "") +
+  `<br>${covLine}`;
 window.__gate = rows; // machine-readable for CI / the agent
+window.__coverage = coverage;
+window.__done = true;
 window.__dbg = { hydra, hs, gl, z, renderHydra, renderZissl, compare, W, H };
 </script>
 </body>

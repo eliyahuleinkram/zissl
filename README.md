@@ -29,14 +29,46 @@ one file of WGSL on the GPU. Same shape both times: one engine file, a thin
 typed host, and the language stays upstream — zaltz is the sound, zissl is
 the picture.
 
-And like zaltz, zissl has its golden gate — and the record. [`harness/`](harness/)
-renders a 55-sketch corpus (every source and transform, feature by feature,
-plus feedback chains) on hydra-synth and on zissl, same pinned clock, and
-pixel-diffs the frames: **55/55 pass, 52 of them bit-exact — average MAE
-0.000/255**. The gate caught four real bugs on its way to green (orientation,
-`shift`'s fract semantics, `modulateRepeatY`'s reference quirk kept
-bug-for-bug, Rec.709 luminance, nearest+clamp output sampling), which is the
-whole point of having one. Run it: serve the repo, open `/harness/`.
+## The golden gate
+
+Like zaltz, zissl is measured against the thing it replaces — and the
+measurement runs itself:
+
+```sh
+npm test              # headless Chrome, both engines, the whole corpus
+npm run gate:watch    # the same run, in a window you can watch
+```
+
+[`harness/`](harness/) renders a 79-sketch corpus on hydra-synth (WebGL) and on
+zissl (WebGPU) under the same pinned clock and pixel-diffs the frames — every
+source and transform feature by feature, plus feedback, function params, array
+sequencing, multi-output wiring, external sources, and the edge values where two
+float pipelines are most likely to part ways. **74/74 comparable sketches match
+pixel for pixel — worst MAE 0.00/255.**
+
+Three things keep it honest:
+
+- **A coverage contract.** The roster is parsed out of hydra-synth's own
+  `glsl-functions.js` at run time, what zissl speaks is probed off the live
+  engine, and what the corpus exercises is recorded by running every sketch past
+  a proxy. The three sets are subtracted and the gate fails **by name** — an
+  operator that exists but is untested, or is tested but missing, is a red build,
+  not a comment someone forgot to update. Today: all 52 of hydra's operators are
+  here and all 52 are exercised.
+- **A self-test.** Every run re-renders one sketch with a small deliberate nudge
+  and requires the gate to catch it. A gate that cannot fail proves nothing.
+- **Named divergences.** Where we knowingly differ, the run says so out loud
+  rather than passing quietly: `prev()` (hydra samples the framebuffer it is
+  currently writing — undefined in GL, illegal in WebGPU; ours is the previous
+  frame, identical to `src(o0)`), and the whole-chain-in-a-number's-slot
+  conversion that hydra documents but never applies (its shader doesn't compile
+  and the output goes black; ours renders). Those are asserted too: ours must
+  paint, and must match the spelling that says the same thing out loud.
+
+The gate has caught real bugs every time it has been widened — orientation,
+`shift`'s fract semantics, `modulateRepeatY`'s reference quirk (kept
+bug-for-bug), Rec.709 luminance, nearest+clamp output sampling, a quadrupled
+`sum`, external-source filtering. That is the whole point of having one.
 
 ## What's in the box
 
@@ -82,9 +114,22 @@ dynamic forms:
 - **sequences** — `osc([10, 40, 80].fast(2).smooth())`, stepped on the bpm
   clock with `.fast` / `.slow` / `.smooth` / `.ease` / `.offset` / `.fit`
 
+…and a fourth Hydra allows and never delivers: **a whole chain in a number's
+slot** — `osc(9).rotate(noise(3))`, the picture read as the value (its channels,
+added, at the same coordinate). Hydra documents that conversion and then emits a
+`vec4` into a `float` parameter, so the shader never compiles and the frame goes
+black; here it renders. `sum([1,1,1,1])` spells it out loud if you prefer.
+
 Outputs and sources match too: `o0…o3` with `render()` showing one output or
-the 2×2 grid, `s0…s3` with `initCam` / `initVideo` / `initImage` /
-`initScreen`, `hush()`, `speed`, `bpm`, `time`, `mouse`.
+the 2×2 grid, `prev()` for the output's own last frame, `s0…s3` with `initCam` /
+`initVideo` / `initImage` / `initScreen`, `hush()`, `speed`, `bpm`, `time`,
+`mouse`, `stats.fps`, and the per-frame hooks `update` / `afterUpdate` (dt in
+milliseconds, Hydra's signature) — as page globals under `makeGlobal`, so
+`update = (dt) => { … }` works exactly as it reads.
+
+External sources sample **nearest**, like Hydra's own textures; pass
+`Zissl.create({ sourceFilter: "linear" })` to trade that parity for smoother
+video under a coordinate warp.
 
 Custom transforms are `setFunction`, same shape as Hydra's — except the body
 is WGSL now, which is the honest price of the new machine:
@@ -144,6 +189,17 @@ function of cycle time, or a number. No `@strudel/*` dependency — and if you
 already use `@strudel/hydra`, its `H` works against zissl **unchanged**,
 because zissl params accept the same zero-arg thunks. Strudel's `feedStrudel`
 trick works too: `s0.init({ src: strudelDrawCanvas })`.
+
+**Mini-notation** — `H("<0!4 1!8>")`, the natural way to gate a section — needs
+a parser, and zissl deliberately doesn't carry one. Hand it Strudel's:
+
+```js
+import { reify } from "@strudel/core";
+z.setReify(reify);                  // now H("<6 8 12 16>") is a real pattern
+```
+
+Without it a string is just a string, and `H` reads a flat 0 — silently, which
+is the worst kind of quiet. One line, and the whole notation is in scope.
 
 ## Try it
 

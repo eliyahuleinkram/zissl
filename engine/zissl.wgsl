@@ -306,6 +306,15 @@ fn zc_g(c0: vec4f, scale: f32, offset: f32) -> vec4f { return vec4f(c0.g * scale
 fn zc_b(c0: vec4f, scale: f32, offset: f32) -> vec4f { return vec4f(c0.b * scale + offset); }
 fn zc_a(c0: vec4f, scale: f32, offset: f32) -> vec4f { return vec4f(c0.a * scale + offset); }
 
+// Hydra's sum(): the channels, scaled and added. In Hydra it returns a bare
+// float — its whole job is turning a chain into a number, which is what the
+// host does when a chain lands in a scalar slot. Called as a colour op it
+// broadcasts, the same liberty zc_r/g/b/a take.
+fn zc_sum(c0: vec4f, r: f32, g: f32, b: f32, a: f32) -> vec4f {
+  let v = c0 * vec4f(r, g, b, a);
+  return vec4f(v.r + v.g + v.b + v.a);
+}
+
 // ------------------------------------------------------------------ blend
 
 fn zb_add(c0: vec4f, c1: vec4f, amount: f32) -> vec4f {

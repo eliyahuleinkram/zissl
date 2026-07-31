@@ -165,8 +165,12 @@ export declare class Zissl {
   fps: number | undefined;
   /** Audio reactivity — Hydra's `a` (a.fft, setBins, show()…). */
   a: Audio;
-  /** Per-frame hook, called with dt in seconds. */
+  /** Per-frame hook, called with dt in MILLISECONDS (Hydra's signature). */
   update: ((dt: number) => void) | null;
+  /** Same, but after the frame is queued — Hydra's afterUpdate. */
+  afterUpdate: ((dt: number) => void) | null;
+  /** Hydra's stats object; fps is the measured frame rate. */
+  readonly stats: { fps: number };
   onerror: ((message: string) => void) | null;
 
   o0: Output; o1: Output; o2: Output; o3: Output;
@@ -180,6 +184,8 @@ export declare class Zissl {
   gradient(speed?: Param): Chain;
   solid(r?: Param, g?: Param, b?: Param, a?: Param): Chain;
   src(input: Output | Source): Chain;
+  /** This output's own last frame — src(oN) without naming the output. */
+  prev(): Chain;
   /** The compute layer — see SwarmFn. */
   swarm: SwarmFn;
 
@@ -199,9 +205,12 @@ export declare class Zissl {
    * zissl's own clock (time · bpm/60).
    */
   setTime(fn: (() => number) | null): this;
+  /** Teach H to read mini-notation strings: hand it Strudel's `reify`. */
+  setReify(fn: ((s: string) => PatternLike) | null): this;
   /** Strudel pattern → per-frame param, sampled on the setTime transport.
+   *  Mini-notation strings work once setReify has been called.
    *  (@strudel/hydra's H also works against zissl unchanged.) */
-  H(p: PatternLike | number | ((cycle: number) => number)): () => number;
+  H(p: PatternLike | string | number | ((cycle: number) => number)): () => number;
   /** Read an output's current frame as ImageData (defaults to the on-screen output). */
   readPixels(output?: Output): Promise<ImageData>;
   /** Hydra's screencap(): download the current frame as a PNG. */

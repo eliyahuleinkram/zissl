@@ -22,6 +22,7 @@ const DEFS = [
   ["gradient", "src", "zs_gradient", [["speed", 0]]],
   ["solid", "src", "zs_solid", [["r", 0], ["g", 0], ["b", 0], ["a", 1]]],
   ["src", "src", null, []],
+  ["prev", "src", null, []], // this output's own last frame — no argument needed
 
   ["rotate", "coord", "zg_rotate", [["angle", 10], ["speed", 0]]],
   ["scale", "coord", "zg_scale", [["amount", 1.5], ["xMult", 1], ["yMult", 1], ["offsetX", 0.5], ["offsetY", 0.5]]],
@@ -45,6 +46,7 @@ const DEFS = [
   ["saturate", "color", "zc_saturate", [["amount", 2]]],
   ["hue", "color", "zc_hue", [["hue", 0.4]]],
   ["colorama", "color", "zc_colorama", [["amount", 0.005]]],
+  ["sum", "color", "zc_sum", [["r", 1], ["g", 1], ["b", 1], ["a", 1]]],
   ["r", "color", "zc_r", [["scale", 1], ["offset", 0]]],
   ["g", "color", "zc_g", [["scale", 1], ["offset", 0]]],
   ["b", "color", "zc_b", [["scale", 1], ["offset", 0]]],
@@ -101,10 +103,33 @@ function seqValue(arr, ctx) {
   return val(arr[Math.floor(mod(index, len))]);
 }
 
+/** A param function is USER code, run every frame for every slot. If it throws
+ *  (a typo, a bad clock instant, a pattern query that comes back empty) the
+ *  throw would unwind the whole frame and stop the rAF loop for the session —
+ *  the canvas freezes black and nothing ever repaints. So: hold the last good
+ *  value for that slot and keep drawing. */
+const lastParam = new WeakMap();
 function evalParam(v, ctx) {
   if (typeof v === "number") return v;
-  if (typeof v === "function") return Number(v(ctx)) || 0;
-  if (Array.isArray(v)) return seqValue(v, ctx);
+  if (typeof v === "function") {
+    try {
+      const n = Number(v(ctx));
+      if (Number.isFinite(n)) {
+        lastParam.set(v, n);
+        return n;
+      }
+      return lastParam.get(v) ?? 0;
+    } catch {
+      return lastParam.get(v) ?? 0;
+    }
+  }
+  if (Array.isArray(v)) {
+    try {
+      return seqValue(v, ctx);
+    } catch {
+      return 0;
+    }
+  }
   return 0;
 }
 
@@ -147,6 +172,10 @@ for (const def of DEFS) {
   const [name, kind, fn, specs] = def;
   if (kind === "src") continue; // sources live on the synth, not the chain
   Chain.prototype[name] = function (...args) {
+    // sum()'s scale is a vec4 in Hydra — `sum([1,1,1,1])` — while every other
+    // array argument is a SEQUENCE. Unpack it so Hydra's own call shape works
+    // here unchanged (this is also the shape our chain→float conversion uses).
+    if (name === "sum" && Array.isArray(args[0])) args = [...args[0]];
     this.stack.push({ def, args });
     return this;
   };
@@ -588,10 +617,15 @@ export class Zissl {
     this.bpm = 30;
     this.fps = undefined; // set to cap the render rate, Hydra-style
     this.mouse = { x: 0, y: 0 };
-    this.update = null; // per-frame hook: (dt seconds) => {}
+    // Hydra's per-frame hooks, same signature (dt in MILLISECONDS) and same
+    // order: update() before the frame is built, afterUpdate() once it's queued.
+    this.update = null;
+    this.afterUpdate = null;
+    this.stats = { fps: 0 };
     this.onerror = null;
     this.a = new Audio(this);
     this._timeFn = null; // external transport for H(), in cycles
+    this._reify = null; // host's string → pattern parser (mini-notation in H)
     this.H = this.H.bind(this);
     this._userFns = [];
     this._defs = new Map(DEFS.map((d) => [d[0], d]));
@@ -605,11 +639,16 @@ export class Zissl {
     this.sampRepeat = device.createSampler({
       addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", magFilter: "nearest", minFilter: "nearest",
     });
-    // External sources keep linear — a deliberate quality liberty for video
-    // (invisible to the golden gate, which only measures generator chains).
+    // Linear+clamp — the canvas blit (an upscaled low-res render must not look
+    // like a mosaic), and external sources when a host asks for smoothing.
     this.sampClamp = device.createSampler({
       addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", magFilter: "linear", minFilter: "linear",
     });
+    // EXTERNAL SOURCES DEFAULT TO NEAREST — hydra's regl textures are nearest,
+    // and the golden gate caught the difference the moment a camera/canvas was
+    // sampled through a coordinate warp (kaleid on s0: MAE 2.45, corr 0.984).
+    // Pass sourceFilter: "linear" to trade that parity for smoother video.
+    this.sampSrc = opts.sourceFilter === "linear" ? this.sampClamp : this.sampRepeat;
 
     this.o0 = new Output(this, 0);
     this.o1 = new Output(this, 1);
@@ -767,10 +806,25 @@ export class Zissl {
     return this;
   }
 
+  /** Teach H how to read a STRING. Hand it Strudel's `reify` (or any
+   *  string → pattern parser) and mini-notation works in a param slot:
+   *  `H("<0!4 1!8>")`. Without it, a string is just a number-ish value —
+   *  which is how a section gate silently reads 0 forever. */
+  setReify(fn) {
+    this._reify = typeof fn === "function" ? fn : null;
+    return this;
+  }
+
   /** Strudel pattern (anything with queryArc) → per-frame param. Also accepts
-   *  a plain function of cycle time, or a number (passthrough). */
+   *  mini-notation (with setReify), a plain function of cycle time, or a
+   *  number (passthrough). */
   H(p) {
     const now = () => (this._timeFn ? this._timeFn() : this.time * (this.bpm / 60));
+    if (typeof p === "string") {
+      const parse = this._reify ?? globalThis.reify;
+      const pat = typeof parse === "function" ? parse(p) : null;
+      if (pat && typeof pat.queryArc === "function") p = pat;
+    }
     if (typeof p === "number") return () => p;
     if (p && typeof p.queryArc === "function") {
       return () => {
@@ -847,6 +901,11 @@ export class Zissl {
       ["speed", () => z.speed, (v) => (z.speed = v)],
       ["bpm", () => z.bpm, (v) => (z.bpm = v)],
       ["fps", () => z.fps, (v) => (z.fps = v)],
+      // Hydra's per-frame hooks are PAGE globals you assign to — `update = (dt)
+      // => {}` — so they have to write through to the instance, not shadow it.
+      ["update", () => z.update, (v) => (z.update = typeof v === "function" ? v : null)],
+      ["afterUpdate", () => z.afterUpdate, (v) => (z.afterUpdate = typeof v === "function" ? v : null)],
+      ["stats", () => z.stats, undefined],
       ["mouse", () => z.mouse, undefined],
       ["width", () => z.width, undefined],
       ["height", () => z.height, undefined],
@@ -872,7 +931,7 @@ export class Zissl {
 
   _setOutput(output, chain) {
     const token = (output._token = (output._token ?? 0) + 1);
-    const inflight = this._compile(chain)
+    const inflight = this._compile(chain, output)
       .then((program) => {
         if (program && output._token === token) output.program = program;
       })
@@ -892,7 +951,7 @@ export class Zissl {
 
   /** Chain → WGSL: walk transforms back-to-front so coord warps compose
    *  screen-first, then emit the source sample, then colors forward. */
-  async _compile(chain) {
+  async _compile(chain, target) {
     const device = this.device;
     const params = [];
     const texRefs = [];
@@ -916,10 +975,32 @@ export class Zissl {
       const samp = ref instanceof Source ? "zsampc" : "zsampr";
       return `zt_tex(ztex${tref(ref)}, ${samp}, ${stv})`;
     };
+    // A CHAIN IN A NUMBER'S SLOT — Hydra's own conversion (format-arguments.js
+    // turns a GlslSource in a float input into `sum([1,1,1,1])`), so
+    // `osc(10).rotate(noise(3))` reads the picture as the angle. We do it in
+    // WGSL at the same coordinate: sample the chain here, add its channels.
+    const asScalar = (x, stv) => {
+      const c = emitArg(x, stv);
+      const s = `v${v++}`;
+      // A chain that ALREADY ends in sum() has done the adding — zc_sum
+      // broadcasts its scalar to every channel, so summing again would
+      // quadruple it (`.rotate(noise().sum([1,1,1,1]))` vs `.rotate(noise())`
+      // must be the same picture; the golden gate measures exactly that).
+      const last = x instanceof Chain ? x.stack[x.stack.length - 1]?.def?.[0] : null;
+      lines.push(last === "sum" ? `let ${s} = ${c}.r;` : `let ${s} = ${c}.r + ${c}.g + ${c}.b + ${c}.a;`);
+      return s;
+    };
+    const isTexArg = (x) =>
+      x instanceof Chain || x instanceof Output || x instanceof Source || x instanceof Swarm;
     // All of def's scalar specs, reading user args at argOffset+k — combine
     // kinds carry their texture as args[0], so their scalars start at 1.
-    const scalars = (def, args, argOffset) =>
-      def[3].map((spec, k) => ", " + pslot(args[argOffset + k] ?? spec[1])).join("");
+    const scalars = (def, args, argOffset, stv) =>
+      def[3]
+        .map((spec, k) => {
+          const arg = args[argOffset + k];
+          return ", " + (isTexArg(arg) ? asScalar(arg, stv) : pslot(arg ?? spec[1]));
+        })
+        .join("");
 
     const emitArg = (x, stv) => {
       if (x instanceof Chain) return emitNode(x.stack, x.stack.length - 1, stv);
@@ -937,41 +1018,47 @@ export class Zissl {
       switch (kind) {
         case "src": {
           const c = `v${v++}`;
-          if (name === "src") {
-            const ref = args[0];
+          if (name === "src" || name === "prev") {
+            // prev() = this output's own last frame: the same ping-pong read
+            // src(o0) does, without having to name the output you're in.
+            const ref = name === "prev" ? (target ?? this.o0) : args[0];
             if (!(ref instanceof Output || ref instanceof Source || ref instanceof Swarm)) {
               throw new Error("zissl: src() takes an output (o0..o3), source (s0..s3) or the swarm");
             }
             lines.push(`let ${c} = ${emitTex(ref, stv)};`);
           } else if (name === "solid") {
-            lines.push(`let ${c} = zs_solid(${def[3].map((s, k) => pslot(args[k] ?? s[1])).join(", ")});`);
+            lines.push(
+              `let ${c} = zs_solid(${def[3]
+                .map((s, k) => (isTexArg(args[k]) ? asScalar(args[k], stv) : pslot(args[k] ?? s[1])))
+                .join(", ")});`,
+            );
           } else {
-            lines.push(`let ${c} = ${fn}(${stv}${scalars(def, args, 0)});`);
+            lines.push(`let ${c} = ${fn}(${stv}${scalars(def, args, 0, stv)});`);
           }
           return c;
         }
         case "coord": {
           const s2 = `v${v++}`;
-          lines.push(`let ${s2} = ${fn}(${stv}${scalars(def, args, 0)});`);
+          lines.push(`let ${s2} = ${fn}(${stv}${scalars(def, args, 0, stv)});`);
           return emitNode(stack, i - 1, s2);
         }
         case "color": {
           const c0 = emitNode(stack, i - 1, stv);
           const c = `v${v++}`;
-          lines.push(`let ${c} = ${fn}(${c0}${scalars(def, args, 0)});`);
+          lines.push(`let ${c} = ${fn}(${c0}${scalars(def, args, 0, stv)});`);
           return c;
         }
         case "combine": {
           const c0 = emitNode(stack, i - 1, stv);
           const c1 = emitArg(args[0] ?? this.o0, stv);
           const c = `v${v++}`;
-          lines.push(`let ${c} = ${fn}(${c0}, ${c1}${scalars(def, args, 1)});`);
+          lines.push(`let ${c} = ${fn}(${c0}, ${c1}${scalars(def, args, 1, stv)});`);
           return c;
         }
         case "combineCoord": {
           const c1 = emitArg(args[0] ?? this.o0, stv);
           const s2 = `v${v++}`;
-          lines.push(`let ${s2} = ${fn}(${stv}, ${c1}${scalars(def, args, 1)});`);
+          lines.push(`let ${s2} = ${fn}(${stv}, ${c1}${scalars(def, args, 1, stv)});`);
           return emitNode(stack, i - 1, s2);
         }
       }
@@ -1062,7 +1149,12 @@ ${lines.map((l) => "  " + l).join("\n")}
     this.time += dt * (Number.isFinite(sp) ? sp : 1);
     if (!Number.isFinite(this.time)) this.time = 0;
     this.a._tick();
-    if (this.update) this.update(dt);
+    this.stats.fps = dt > 0 ? Math.round(1 / dt) : this.stats.fps;
+    // Hydra's per-frame hooks. They run user code — a throw here would kill the
+    // rAF loop for the session, so they never escape their own frame.
+    if (this.update) {
+      try { this.update(dtMs); } catch (e) { this._hookError(e); }
+    }
 
     const ctx = {
       time: this.time,
@@ -1108,7 +1200,7 @@ ${lines.map((l) => "  " + l).join("\n")}
         entries: [
           { binding: 0, resource: { buffer: prog.ubuf } },
           { binding: 1, resource: this.sampRepeat },
-          { binding: 2, resource: this.sampClamp },
+          { binding: 2, resource: this.sampSrc },
           ...prog.texRefs.map((ref, i) => ({
             binding: 3 + i,
             resource: ref.frontView ?? ref.view,
@@ -1151,6 +1243,16 @@ ${lines.map((l) => "  " + l).join("\n")}
     pass.end();
 
     device.queue.submit([encoder.finish()]);
+
+    if (this.afterUpdate) {
+      try { this.afterUpdate(dtMs); } catch (e) { this._hookError(e); }
+    }
+  }
+
+  /** A throw inside update()/afterUpdate() must cost one frame, never the loop. */
+  _hookError(e) {
+    if (this.onerror) this.onerror(String(e));
+    else console.error(e);
   }
 }
 
