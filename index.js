@@ -1,3 +1,7 @@
+// zissl — Copyright (C) 2026 Eliyahu Moshe Leinkram
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Full notice: see LICENSE and NOTICE.md at the repo root.
+
 /**
  * zissl — Hydra's synth language on a WebGPU renderer, in one file of WGSL.
  * This module is the thin browser host: it turns transform chains like

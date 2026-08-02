@@ -1,3 +1,7 @@
+// zissl — Copyright (C) 2026 Eliyahu Moshe Leinkram
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Full notice: see LICENSE and NOTICE.md at the repo root.
+
 /**
  * THE COVERAGE CONTRACT — the zaltz treatment, applied to the picture.
  *

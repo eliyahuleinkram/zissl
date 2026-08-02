@@ -1,5 +1,8 @@
 # Notices
 
+zissl is Copyright (C) 2026 Eliyahu Moshe Leinkram, licensed
+AGPL-3.0-or-later. See [LICENSE](LICENSE).
+
 zissl is a derivative work of **[hydra-synth](https://github.com/hydra-synth/hydra-synth)**,
 the live-coding video synthesizer by Olivia Jack and contributors
 (AGPL-3.0-or-later). The engine re-implements Hydra's synth language in WGSL —

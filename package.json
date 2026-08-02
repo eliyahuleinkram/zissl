@@ -42,7 +42,7 @@
     "creative-coding"
   ],
   "license": "AGPL-3.0-or-later",
-  "author": "Klappn (https://klappn.com)",
+  "author": "Eliyahu Moshe Leinkram (https://klappn.com)",
   "devDependencies": {
     "hydra-synth": "^1.4.0",
     "puppeteer-core": "^25.4.0"
