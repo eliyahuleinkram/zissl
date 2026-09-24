@@ -761,6 +761,7 @@ export class Zissl {
     // back on o0, and the per-frame hooks gone — a sketch that ended on render(o1) or set
     // update = … must not reach into the next one.
     for (const o of this._outputs) {
+      o.program?.ubuf.destroy();
       o.program = null;
       o._clear = true;
     }
@@ -946,7 +947,10 @@ export class Zissl {
     const token = (output._token = (output._token ?? 0) + 1);
     const inflight = this._compile(chain, output)
       .then((program) => {
-        if (program && output._token === token) output.program = program;
+        if (!program) return;
+        if (output._token !== token) return void program.ubuf.destroy();
+        output.program?.ubuf.destroy(); // queued work finishes first; the buffer is small but not free
+        output.program = program;
       })
       .catch((e) => {
         if (this.onerror) this.onerror(String(e));
@@ -1111,6 +1115,17 @@ ${lines.map((l) => "  " + l).join("\n")}
   return ${cfinal};
 }`;
 
+    // THE SAME SHADER, ONCE: a host that switches between sketches (a gallery, a set moving
+    // song to song) comes back to programs it has already built — reuse the compiled pipeline,
+    // keyed by its exact WGSL. Bounded, oldest out. Params live in the per-program buffer.
+    this._pipes ??= new Map();
+    const hit = this._pipes.get(code);
+    if (hit) {
+      this._pipes.delete(code);
+      this._pipes.set(code, hit); // most recent last
+      const ubuf = device.createBuffer({ size: 32 + np * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      return { pipeline: hit.pipeline, bgl: hit.bgl, ubuf, cpu: new Float32Array(8 + np * 4), params, texRefs, code };
+    }
     device.pushErrorScope("validation");
     const module = device.createShaderModule({ code });
     const bgl = device.createBindGroupLayout({
@@ -1136,6 +1151,8 @@ ${lines.map((l) => "  " + l).join("\n")}
       throw new Error("zissl: shader failed to compile — " + err.message + "\n\n" + code);
     }
 
+    this._pipes.set(code, { pipeline, bgl });
+    if (this._pipes.size > 64) this._pipes.delete(this._pipes.keys().next().value);
     const ubuf = device.createBuffer({
       size: 32 + np * 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
