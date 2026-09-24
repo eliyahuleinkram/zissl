@@ -757,10 +757,19 @@ export class Zissl {
 
   /** Black, everywhere, now. Programs drop; feedback buffers clear. */
   hush() {
+    // hydra's hush(), all of it: every output to black, the sources cleared, the picture
+    // back on o0, and the per-frame hooks gone — a sketch that ended on render(o1) or set
+    // update = … must not reach into the next one.
     for (const o of this._outputs) {
       o.program = null;
       o._clear = true;
     }
+    for (const src of this._sources) {
+      try { src.clear?.(); } catch { /* a source that never started */ }
+    }
+    this._renderOut = this.o0;
+    this.update = null;
+    this.afterUpdate = null;
     this._swarmSys.active = false; // sketches re-arm it by calling swarm()
   }
 
@@ -1049,7 +1058,11 @@ export class Zissl {
         case "color": {
           const c0 = emitNode(stack, i - 1, stv);
           const c = `v${v++}`;
-          lines.push(`let ${c} = ${fn}(${c0}${scalars(def, args, 0, stv)});`);
+          // posterize's pow() folds the way hydra's GLSL compiler folds it — but only for a
+          // LITERAL gamma, exactly as in hydra (see zc_hpow in engine/zissl.wgsl).
+          const f =
+            name === "posterize" && typeof (args[1] ?? def[3][1][1]) === "number" ? "zc_posterize_lit" : fn;
+          lines.push(`let ${c} = ${f}(${c0}${scalars(def, args, 0, stv)});`);
           return c;
         }
         case "combine": {
@@ -1175,6 +1188,7 @@ ${lines.map((l) => "  " + l).join("\n")}
     this._swarmSys._tick(encoder, dt); // compute first — chains sample fresh trail
     const drew = [];
 
+    const order = this._outputs;
     for (const o of this._outputs) {
       if (o._clear) {
         for (const view of o._views) {
@@ -1205,9 +1219,16 @@ ${lines.map((l) => "  " + l).join("\n")}
           { binding: 0, resource: { buffer: prog.ubuf } },
           { binding: 1, resource: this.sampRepeat },
           { binding: 2, resource: this.sampSrc },
+          // HYDRA'S READ ORDER, exactly (measured against hydra-synth): outputs draw o0…o3 in
+          // turn, and src(oX) reads X's OTHER ping-pong buffer. So an output that renders
+          // LATER this frame is read two frames old (its back buffer, not yet overwritten),
+          // while an earlier output or the output itself is read as of last frame (front).
           ...prog.texRefs.map((ref, i) => ({
             binding: 3 + i,
-            resource: ref.frontView ?? ref.view,
+            resource:
+              ref instanceof Output && ref.program && order.indexOf(ref) > order.indexOf(o)
+                ? ref.backView
+                : (ref.frontView ?? ref.view),
           })),
         ],
       });
@@ -1221,8 +1242,7 @@ ${lines.map((l) => "  " + l).join("\n")}
       pass.end();
       drew.push(o);
     }
-    // swap after everything rendered — every read this frame saw last frame,
-    // so feedback is deterministic no matter which output reads which
+    // swap after everything rendered — reads this frame followed hydra's order (above)
     for (const o of drew) o._swap();
 
     const canvasView = this.gpuctx.getCurrentTexture().createView();

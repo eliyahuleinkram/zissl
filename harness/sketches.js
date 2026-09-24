@@ -14,11 +14,11 @@
  *  - no mouse, no audio, no wall clock
  *  - arrays ARE measured: both engines read index = time·speed·(bpm/60)+offset
  *    off the SAME patched Array.prototype, and the harness pins bpm
- *  - cross-output sketches use TIME-INDEPENDENT sources on purpose: hydra
- *    renders o0…o3 in order (a later output sees this frame's earlier one),
- *    zissl renders all four then swaps (every read sees last frame). Static
- *    content converges identically, so the wiring is proven without measuring
- *    a one-frame lag that is a documented semantic difference, not a bug.
+ *  - cross-output reads are MEASURED, moving content and all (2026-09-24):
+ *    hydra draws o0…o3 in turn and src(oX) reads X's OTHER ping-pong buffer, so
+ *    an output rendering LATER this frame is read two frames old and an earlier
+ *    one (or itself) as of last frame. zissl reads exactly that way now — the
+ *    "one-frame lag" this corpus used to step around was a real difference.
  */
 export const SKETCHES = [
   // ------------------------------------------------------------- sources
@@ -44,6 +44,12 @@ export const SKETCHES = [
 
   // --------------------------------------------------------------- color
   ["posterize", (s) => s.gradient(0.2).posterize(5, 0.8).out(s.o0)],
+  // a NEGATIVE base (noise is negative half the time) through posterize: hydra's
+  // GLSL compiler folds pow() for a LITERAL exponent (x^1 = x, x^(2k) = (x·x)^k),
+  // so the value survives into invert(); a function exponent is a uniform, never folded
+  ["posterize-negative", (s) => s.noise(3, 0.1).posterize(3, 1).invert().out(s.o0)],
+  ["posterize-negative-even", (s) => s.noise(3, 0.1).posterize(4, 2).invert().out(s.o0)],
+  ["posterize-negative-dynamic", (s) => s.noise(3, 0.1).posterize(3, () => 1).invert().out(s.o0)],
   ["shift", (s) => s.osc(10, 0.1, 1).shift(0.3, 0.1, 0.2, 0).out(s.o0)],
   ["invert", (s) => s.osc(10, 0.1, 1).invert(0.8).out(s.o0)],
   ["contrast", (s) => s.osc(10, 0.1, 1).contrast(1.8).out(s.o0)],
@@ -145,6 +151,19 @@ export const SKETCHES = [
     s.solid(0.8, 0.2, 0.4, 1).out(s.o1);
     s.shape(3, 0.5, 0.05).out(s.o2);
     s.src(s.o1).mask(s.src(s.o2)).out(s.o0);
+  }],
+  ["cross-output-later", (s) => {
+    s.osc(10, 0.5, 0).out(s.o1);
+    s.src(s.o1).out(s.o0);
+  }],
+  ["cross-output-chain", (s) => {
+    s.osc(10, 0.5, 0).out(s.o2);
+    s.src(s.o2).rotate(0.3).out(s.o1);
+    s.src(s.o1).out(s.o0);
+  }],
+  ["cross-output-feedback", (s) => {
+    s.noise(8, 0.4).thresh(0.6, 0.05).add(s.src(s.o1).brightness(-0.05), 0.9).out(s.o1);
+    s.src(s.o1).out(s.o0);
   }],
 
   // EXTERNAL SOURCE — s0 fed a canvas the harness paints identically for both

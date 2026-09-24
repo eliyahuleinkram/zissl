@@ -56,8 +56,12 @@ fn z_hsv2rgb(c: vec3f) -> vec3f {
 // screen (st.y = 0 at the top — measured against hydra-synth's own render in
 // harness/, not assumed), which is also raw texture space: no flip anywhere,
 // and feedback loops, images and readbacks all round-trip identically.
+// hydra's src() is `texture2D(tex, fract(_st))` — the sampler clamps, but the
+// fract WRAPS every read, so a rotated / modulated / shrunk output tiles at its
+// edges instead of smearing them (2026-09-24: the library parity run caught it —
+// scroll hid it, because hydra's scroll fracts its own coordinates first).
 fn zt_tex(t: texture_2d<f32>, s: sampler, st: vec2f) -> vec4f {
-  return textureSample(t, s, st);
+  return textureSample(t, s, fract(st));
 }
 
 // Ashima 3D simplex noise — the same one Hydra ships via glsl-noise.
@@ -236,6 +240,29 @@ fn zg_scrollY(st0: vec2f, scrollY: f32, speed: f32) -> vec2f {
 }
 
 // ------------------------------------------------------------------ color
+
+// A LITERAL EXPONENT IS REWRITTEN BY THE GLSL COMPILER — and hydra writes literal args
+// straight into its shader. Measured against hydra-synth on Chrome (ANGLE → Metal), with a
+// negative base: x^1 → x, x^-1 → 1/x, x^(2k) → (x·x)^k, so the value SURVIVES; every other
+// exponent (3, 5, 0.5, 1.5 …) stays a real pow, undefined for x < 0 (NaN) on both engines.
+// Noise is negative half the time, so `noise().posterize(3, 1).invert()` is white in hydra
+// and was black here. Only for LITERAL args — a function or array gamma is a uniform in
+// hydra too, never folded (the compiler picks zc_posterize_lit; see _compile).
+fn zc_hpow(x: vec4f, e: f32) -> vec4f {
+  if (e == 1.0) { return x; }
+  if (e == -1.0) { return 1.0 / x; }
+  if (e != 0.0 && fract(e * 0.5) == 0.0) { return pow(x * x, vec4f(e * 0.5)); }
+  return pow(x, vec4f(e));
+}
+
+fn zc_posterize_lit(c0: vec4f, bins: f32, gamma: f32) -> vec4f {
+  var c2 = zc_hpow(c0, gamma);
+  c2 = c2 * vec4f(bins);
+  c2 = floor(c2);
+  c2 = c2 / vec4f(bins);
+  c2 = zc_hpow(c2, 1.0 / gamma);
+  return vec4f(c2.rgb, c0.a);
+}
 
 fn zc_posterize(c0: vec4f, bins: f32, gamma: f32) -> vec4f {
   var c2 = pow(c0, vec4f(gamma));
