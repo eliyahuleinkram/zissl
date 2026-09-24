@@ -39,12 +39,14 @@ npm test              # headless Chrome, both engines, the whole corpus
 npm run gate:watch    # the same run, in a window you can watch
 ```
 
-[`harness/`](harness/) renders a 79-sketch corpus on hydra-synth (WebGL) and on
+[`harness/`](harness/) renders an 85-sketch corpus on hydra-synth (WebGL) and on
 zissl (WebGPU) under the same pinned clock and pixel-diffs the frames — every
 source and transform feature by feature, plus feedback, function params, array
-sequencing, multi-output wiring, external sources, and the edge values where two
-float pipelines are most likely to part ways. **74/74 comparable sketches match
-pixel for pixel — worst MAE 0.00/255.**
+sequencing, multi-output wiring (moving content, in Hydra's exact read order),
+external sources, and the edge values where two float pipelines are most likely
+to part ways. **80/80 comparable sketches match pixel for pixel — worst MAE
+0.00/255.** Beyond the corpus, a library of 303 real-world sketches (klappn's)
+renders on both engines and matches frame for frame.
 
 Three things keep it honest:
 
